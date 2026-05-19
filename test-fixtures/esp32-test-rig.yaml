@@ -1,0 +1,180 @@
+# ESPHome test rig for ESPHomeBridge plugin development.
+#
+# Run on the ESP32 BLE proxy device (MAC FCB4674EAEC8) after reflashing.
+# Exposes a deliberately broad set of entity types so we can exercise every
+# code path in the plugin: switch, light (with brightness + RGB + CT),
+# binary_sensor (motion + button), sensor (numeric), text_sensor, cover, fan.
+#
+# Encryption: DISABLED for simple testing. Once everything works we can
+# re-enable with a known key.
+
+substitutions:
+  device_name: esphome-test-rig
+  friendly_name: ESPHome Test Rig
+
+esphome:
+  name: ${device_name}
+  friendly_name: ${friendly_name}
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+# WiFi - put your SSID + password here or use the captive portal on first boot
+wifi:
+  ssid: "Highsteads_IOT"      # adjust as needed
+  password: ""                # adjust as needed
+  ap:
+    ssid: "ESPHome-TestRig-AP"
+    password: "12345678"
+
+captive_portal:
+
+# ---- API ----
+# No encryption for testing. (Add `encryption: key: ...` once everything works.)
+api:
+  reboot_timeout: 0s    # don't reboot if API client disconnects
+
+# OTA update support so we can iterate without USB
+ota:
+  - platform: esphome
+    password: "indigotestrig"   # known password for OTA
+
+# Web UI fallback (port 80)
+web_server:
+  port: 80
+  version: 3
+
+logger:
+  level: INFO
+
+# ---- Synthetic test entities ----
+
+# A virtual switch we can toggle from Indigo
+switch:
+  - platform: template
+    name: "Test Switch"
+    id: test_switch
+    optimistic: true     # state follows commands without external feedback
+    icon: mdi:toggle-switch
+
+# A virtual dimmable light (no real LED - just state)
+light:
+  - platform: monochromatic
+    name: "Test Dimmer"
+    id: test_dimmer
+    output: dummy_pwm
+    default_transition_length: 0.5s
+
+  # RGB light test (template — no real GPIO output, just state)
+  - platform: partition
+    name: "Test RGB"
+    id: test_rgb
+    segments:
+      - single_light_id: test_dimmer
+
+# Dummy PWM output for the dimmer (writes to nothing — just state)
+output:
+  - platform: template
+    id: dummy_pwm
+    type: float
+    write_action:
+      - logger.log:
+          format: "Dummy PWM set to %.2f"
+          args: ["state"]
+
+# Binary sensor we can flip in code to test triggers
+binary_sensor:
+  - platform: template
+    name: "Test Motion"
+    id: test_motion
+    device_class: motion
+    lambda: |-
+      return id(motion_state);
+
+  - platform: template
+    name: "Test Door"
+    id: test_door
+    device_class: door
+    lambda: |-
+      return id(door_state);
+
+# A button entity — fires an event when pressed (no state)
+button:
+  - platform: template
+    name: "Test Button"
+    id: test_button
+    on_press:
+      - logger.log: "Test button pressed!"
+
+# Numeric sensors with values we control
+sensor:
+  - platform: template
+    name: "Test Counter"
+    id: test_counter
+    lambda: 'return id(counter);'
+    update_interval: 5s
+    unit_of_measurement: "events"
+
+  - platform: uptime
+    name: "Uptime"
+    update_interval: 30s
+
+  - platform: wifi_signal
+    name: "WiFi RSSI"
+    update_interval: 30s
+
+# Text sensor
+text_sensor:
+  - platform: template
+    name: "Test Status"
+    id: test_status
+    lambda: 'return std::string("running");'
+    update_interval: 60s
+
+# Fan
+fan:
+  - platform: template
+    name: "Test Fan"
+    id: test_fan
+    speed_count: 5
+
+# Cover (blind / shutter)
+cover:
+  - platform: template
+    name: "Test Cover"
+    id: test_cover
+    optimistic: true
+    open_action:
+      - logger.log: "Test cover opening"
+    close_action:
+      - logger.log: "Test cover closing"
+    stop_action:
+      - logger.log: "Test cover stop"
+
+# Global counters / state for the synthetic sensors above
+globals:
+  - id: counter
+    type: int
+    initial_value: '0'
+
+  - id: motion_state
+    type: bool
+    initial_value: 'false'
+
+  - id: door_state
+    type: bool
+    initial_value: 'false'
+
+# Periodic tick so the test counter increments + a way to flip
+# motion/door states via API service calls
+interval:
+  - interval: 5s
+    then:
+      - lambda: 'id(counter) += 1;'
+
+# Optional: BLE proxy (kept from the device's original use). Comment out
+# if not needed — saves memory.
+bluetooth_proxy:
+  active: true

@@ -1,0 +1,2 @@
+aioesphomeapi>=24.0.0
+zeroconf>=0.130.0

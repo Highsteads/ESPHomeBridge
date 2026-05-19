@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MenuItems>
+
+    <MenuItem id="discoverDevices">
+        <Name>Discover ESPHome Devices Now</Name>
+        <CallbackMethod>menuDiscoverDevices</CallbackMethod>
+    </MenuItem>
+
+    <MenuItem id="listSeenDevices">
+        <Name>List Discovered Devices</Name>
+        <CallbackMethod>menuListSeenDevices</CallbackMethod>
+    </MenuItem>
+
+    <MenuItem id="dumpEntities">
+        <Name>Dump All Entities to Log</Name>
+        <CallbackMethod>menuDumpEntities</CallbackMethod>
+    </MenuItem>
+
+    <MenuItem id="sep1" isSeparator="true"/>
+
+    <MenuItem id="showPluginInfo">
+        <Name>Show Plugin Info</Name>
+        <CallbackMethod>showPluginInfo</CallbackMethod>
+    </MenuItem>
+
+</MenuItems>

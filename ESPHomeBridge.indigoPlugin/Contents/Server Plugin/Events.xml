@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Events>
+
+    <Event id="deviceOnline">
+        <Name>ESPHome Device Came Online</Name>
+        <ConfigUI>
+            <Field id="targetAddress" type="textfield" defaultValue="">
+                <Label>MAC Address (blank = any):</Label>
+            </Field>
+        </ConfigUI>
+    </Event>
+
+    <Event id="deviceOffline">
+        <Name>ESPHome Device Went Offline</Name>
+        <ConfigUI>
+            <Field id="targetAddress" type="textfield" defaultValue="">
+                <Label>MAC Address (blank = any):</Label>
+            </Field>
+        </ConfigUI>
+    </Event>
+
+    <Event id="newDeviceDiscovered">
+        <Name>New ESPHome Device Discovered</Name>
+        <ConfigUI>
+            <Field id="info" type="label">
+                <Label>Fires whenever a previously-unseen ESPHome device is found via mDNS.</Label>
+            </Field>
+        </ConfigUI>
+    </Event>
+
+</Events>

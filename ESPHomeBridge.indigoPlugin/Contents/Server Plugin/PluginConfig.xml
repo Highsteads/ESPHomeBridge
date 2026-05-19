@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<PluginConfig>
+
+    <Field id="discoveryHeader" type="label">
+        <Label>ESPHome Device Discovery</Label>
+    </Field>
+
+    <Field id="discoveryNote" type="label" alignText="left">
+        <Label>The plugin discovers ESPHome devices on your LAN via mDNS (Bonjour). Each discovered device gets auto-created as an esphomeNode device plus one device per controllable entity (switch, light, etc).</Label>
+    </Field>
+
+    <Field id="autoCreateDevices" type="checkbox" defaultValue="true">
+        <Label>Auto-create Indigo devices on discovery:</Label>
+    </Field>
+
+    <Field id="autoCreateEntities" type="checkbox" defaultValue="true">
+        <Label>Auto-create individual entity devices (switches, lights, etc):</Label>
+        <Description>If unchecked, only the parent esphomeNode device is created and entities live as dynamic states on it.</Description>
+    </Field>
+
+    <Field id="sep1" type="separator"/>
+
+    <Field id="authHeader" type="label">
+        <Label>API Authentication</Label>
+    </Field>
+
+    <Field id="authNote" type="label" alignText="left">
+        <Label>ESPHome devices may use an API encryption key (recommended) or password (legacy). Either way, the key is per-device. Set it in the device's Configure dialog after discovery. The default below is used when a discovered device offers no key field of its own.</Label>
+    </Field>
+
+    <Field id="defaultEncryptionKey" type="textfield" secure="true" defaultValue="">
+        <Label>Default API Encryption Key:</Label>
+        <Description>Base64-encoded; from the device's YAML 'api: encryption: key:' line. Leave blank to attempt unencrypted connection.</Description>
+    </Field>
+
+    <Field id="sep2" type="separator"/>
+
+    <Field id="loggingHeader" type="label">
+        <Label>Logging</Label>
+    </Field>
+
+    <Field id="logLevel" type="menu" defaultValue="INFO">
+        <Label>Log Level:</Label>
+        <List>
+            <Option value="DEBUG">Debug (verbose)</Option>
+            <Option value="INFO">Info</Option>
+            <Option value="WARNING">Warning only</Option>
+            <Option value="ERROR">Error only</Option>
+        </List>
+    </Field>
+
+</PluginConfig>

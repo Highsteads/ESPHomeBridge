@@ -75,7 +75,8 @@ light:
     segments:
       - single_light_id: test_dimmer
 
-# Dummy PWM output for the dimmer (writes to nothing — just state)
+# Dummy template outputs (write nothing real, just log) for the
+# dimmer light and the speed fan to drive.
 output:
   - platform: template
     id: dummy_pwm
@@ -83,6 +84,13 @@ output:
     write_action:
       - logger.log:
           format: "Dummy PWM set to %.2f"
+          args: ["state"]
+  - platform: template
+    id: dummy_fan_output
+    type: float
+    write_action:
+      - logger.log:
+          format: "Fan output set to %.2f"
           args: ["state"]
 
 # Binary sensor we can flip in code to test triggers
@@ -134,25 +142,31 @@ text_sensor:
     lambda: 'return std::string("running");'
     update_interval: 60s
 
-# Fan
+# Fan — variable speed (1-5) via a 'speed' fan over a dummy template
+# output. ESPHome's 'speed' fan platform supports speed_level commands
+# natively (in contrast to 'template' fan which is state-only).
 fan:
-  - platform: template
+  - platform: speed
     name: "Test Fan"
     id: test_fan
+    output: dummy_fan_output
     speed_count: 5
 
-# Cover (blind / shutter)
+# Cover (blind / shutter) — positional 0.0-1.0
 cover:
   - platform: template
     name: "Test Cover"
     id: test_cover
-    optimistic: true
+    has_position: true
+    lambda: 'return id(cover_position);'
     open_action:
-      - logger.log: "Test cover opening"
+      - lambda: 'id(cover_position) = 1.0;'
     close_action:
-      - logger.log: "Test cover closing"
+      - lambda: 'id(cover_position) = 0.0;'
     stop_action:
       - logger.log: "Test cover stop"
+    position_action:
+      - lambda: 'id(cover_position) = pos;'
 
 # Global counters / state for the synthetic sensors above
 globals:
@@ -167,6 +181,14 @@ globals:
   - id: door_state
     type: bool
     initial_value: 'false'
+
+  - id: fan_state
+    type: bool
+    initial_value: 'false'
+
+  - id: cover_position
+    type: float
+    initial_value: '1.0'   # start fully open
 
 # Periodic tick so the test counter increments + a way to flip
 # motion/door states via API service calls

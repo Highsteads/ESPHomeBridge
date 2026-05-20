@@ -431,7 +431,7 @@ class Plugin(indigo.PluginBase):
         """Translate an ESPHome state object into Indigo state writes."""
         from aioesphomeapi import (
             SwitchState, SensorState, BinarySensorState, LightState,
-            TextSensorState,
+            TextSensorState, FanState, CoverState,
         )
         if isinstance(state, SwitchState):
             dev.updateStateOnServer("onOffState", bool(state.state))
@@ -469,6 +469,62 @@ class Plugin(indigo.PluginBase):
                 ])
             if hasattr(state, "color_temperature") and state.color_temperature:
                 dev.updateStateOnServer("colorTemp", int(state.color_temperature))
+            # RGB - only write if the device actually supports color. ESPHome
+            # populates state.red/green/blue even on monochromatic lights
+            # (defaults of 1.0), so we can't gate on attribute presence.
+            supports_rgb = bool(dev.pluginProps.get("SupportsRGB", False))
+            if supports_rgb:
+                if hasattr(state, "red") and state.red is not None:
+                    dev.updateStateOnServer("redLevel",   int(round(state.red   * 100)))
+                if hasattr(state, "green") and state.green is not None:
+                    dev.updateStateOnServer("greenLevel", int(round(state.green * 100)))
+                if hasattr(state, "blue") and state.blue is not None:
+                    dev.updateStateOnServer("blueLevel",  int(round(state.blue  * 100)))
+
+        elif isinstance(state, FanState):
+            # ESPHome fan: state (bool), speed_level (int 0..N), oscillating,
+            # direction. Map speed_level / supports_speed_levels to 0-100
+            # for Indigo's brightness slider.
+            on = bool(state.state)
+            speed = getattr(state, "speed_level", None)
+            try:
+                max_speed = int((dev.pluginProps.get("speedLevels") or "0"))
+            except (TypeError, ValueError):
+                max_speed = 0
+            if not on:
+                dev.updateStatesOnServer([
+                    {"key": "onOffState",      "value": False},
+                    {"key": "brightnessLevel", "value": 0},
+                ])
+            elif speed is not None and max_speed > 0:
+                pct = max(1, min(100, int(round(speed * 100 / max_speed))))
+                dev.updateStatesOnServer([
+                    {"key": "onOffState",      "value": True},
+                    {"key": "brightnessLevel", "value": pct},
+                ])
+            else:
+                dev.updateStateOnServer("onOffState", True)
+            if hasattr(state, "oscillating") and state.oscillating is not None:
+                dev.updateStateOnServer("oscillating", bool(state.oscillating))
+            if hasattr(state, "direction") and state.direction is not None:
+                # ESPHome FanDirection int: 0=forward, 1=reverse
+                dev.updateStateOnServer("direction",
+                    "reverse" if int(state.direction) == 1 else "forward")
+
+        elif isinstance(state, CoverState):
+            # ESPHome cover: position (0.0-1.0), current_operation (0/1/2),
+            # tilt (0.0-1.0). Map position to brightness 0-100; 0=closed,
+            # 100=open. onOffState True if position > 0.
+            pos = getattr(state, "position", None)
+            op  = getattr(state, "current_operation", 0)
+            if pos is not None:
+                pct = int(round(pos * 100))
+                dev.updateStatesOnServer([
+                    {"key": "onOffState",      "value": pct > 0},
+                    {"key": "brightnessLevel", "value": pct},
+                ])
+            op_map = {0: "idle", 1: "opening", 2: "closing"}
+            dev.updateStateOnServer("currentOperation", op_map.get(int(op), str(op)))
 
     # --------------------------------------------------------
     # Indigo device lifecycle
@@ -563,6 +619,7 @@ class Plugin(indigo.PluginBase):
         """Auto-create one Indigo device per ESPHome entity we know how to map."""
         from aioesphomeapi import (
             SwitchInfo, SensorInfo, BinarySensorInfo, LightInfo, TextSensorInfo,
+            FanInfo, CoverInfo,
         )
         folder_id = self._ensure_device_folder(DEVICE_FOLDER_NAME)
         for e in entities:
@@ -580,14 +637,24 @@ class Plugin(indigo.PluginBase):
                 type_id = "esphomeSensor"
             elif isinstance(e, LightInfo):
                 type_id = "esphomeLight"
-                # Detect colour modes - aioesphomeapi exposes supported_color_modes
                 modes = set(getattr(e, "supported_color_modes", []) or [])
-                # ColorMode int values: 1=on/off, 2=brightness, 11=color_temp, 35=rgb, 19=rgb_white,
-                # 27=rgb_cold_warm_white. Detail bits matter less than presence.
+                # ColorMode int values: 1=on/off, 2=brightness, 11=color_temp,
+                # 19=rgb_white, 27=rgb_cold_warm_white, 35=rgb. Presence of
+                # any RGB-capable mode means SupportsColor / SupportsRGB.
                 extra_props["SupportsColor"]            = any(m >= 19 for m in modes)
                 extra_props["SupportsRGB"]              = any(m >= 19 for m in modes)
                 extra_props["SupportsWhite"]            = 11 in modes or 27 in modes
                 extra_props["SupportsWhiteTemperature"] = 11 in modes or 27 in modes
+            elif isinstance(e, FanInfo):
+                type_id = "esphomeFan"
+                extra_props["speedLevels"]          = str(getattr(e, "supported_speed_levels", 0) or 0)
+                extra_props["supportsOscillation"]  = bool(getattr(e, "supports_oscillation", False))
+                extra_props["supportsDirection"]    = bool(getattr(e, "supports_direction", False))
+            elif isinstance(e, CoverInfo):
+                type_id = "esphomeCover"
+                extra_props["supportsPosition"]     = bool(getattr(e, "supports_position", True))
+                extra_props["supportsTilt"]         = bool(getattr(e, "supports_tilt", False))
+                extra_props["deviceClass"]          = getattr(e, "device_class", "") or ""
             else:
                 continue  # unknown / unsupported entity type for v0.1
 
@@ -700,6 +767,20 @@ class Plugin(indigo.PluginBase):
                 new_level = max(0, min(100, current + delta))
                 kwargs["state"] = new_level > 0
                 kwargs["brightness"] = new_level / 100.0
+            elif da == indigo.kDeviceAction.SetColorLevels:
+                # Indigo passes action.actionValue as a dict-like ColorValues
+                # object with redLevel/greenLevel/blueLevel/whiteLevel/whiteLevel2
+                # all in 0.0-100.0 range. Map to ESPHome's 0.0-1.0 rgb tuple
+                # plus optional brightness preservation.
+                colors = action.actionValue
+                r = float(colors.get("redLevel",   0)) / 100.0
+                g = float(colors.get("greenLevel", 0)) / 100.0
+                b = float(colors.get("blueLevel",  0)) / 100.0
+                kwargs["state"] = True
+                kwargs["rgb"]   = (r, g, b)
+                # Preserve current brightness
+                cur_b = dev.brightness or 100
+                kwargs["brightness"] = max(cur_b, 1) / 100.0
             else:
                 self.logger.debug(f"Unhandled light action {da} on {dev.name}")
                 return
@@ -712,6 +793,75 @@ class Plugin(indigo.PluginBase):
                     self.logger.exception(f"light_command failed for {dev.name}")
 
             self.async_loop.call_soon_threadsafe(_do_light)
+            return
+
+        if dev.deviceTypeId == "esphomeFan":
+            try:
+                max_speed = int((dev.pluginProps.get("speedLevels") or "0"))
+            except (TypeError, ValueError):
+                max_speed = 0
+            fan_kwargs = {"key": key}
+            if da == indigo.kDeviceAction.TurnOn:
+                fan_kwargs["state"] = True
+            elif da == indigo.kDeviceAction.TurnOff:
+                fan_kwargs["state"] = False
+            elif da == indigo.kDeviceAction.Toggle:
+                fan_kwargs["state"] = not bool(dev.onState)
+            elif da == indigo.kDeviceAction.SetBrightness:
+                pct = int(action.actionValue)
+                fan_kwargs["state"] = pct > 0
+                if max_speed > 0 and pct > 0:
+                    fan_kwargs["speed_level"] = max(1, min(max_speed, int(round(pct * max_speed / 100))))
+            elif da in (indigo.kDeviceAction.BrightenBy, indigo.kDeviceAction.DimBy):
+                current = dev.brightness or 0
+                delta = int(action.actionValue)
+                if da == indigo.kDeviceAction.DimBy:
+                    delta = -delta
+                pct = max(0, min(100, current + delta))
+                fan_kwargs["state"] = pct > 0
+                if max_speed > 0 and pct > 0:
+                    fan_kwargs["speed_level"] = max(1, min(max_speed, int(round(pct * max_speed / 100))))
+            else:
+                self.logger.debug(f"Unhandled fan action {da} on {dev.name}")
+                return
+
+            def _do_fan():
+                try:
+                    client.fan_command(**fan_kwargs)
+                except Exception:
+                    self.logger.exception(f"fan_command failed for {dev.name}")
+
+            self.async_loop.call_soon_threadsafe(_do_fan)
+            return
+
+        if dev.deviceTypeId == "esphomeCover":
+            # Indigo's brightness 0-100 maps to position 0.0-1.0 (0=closed)
+            cover_kwargs = {"key": key}
+            if da == indigo.kDeviceAction.TurnOn:
+                cover_kwargs["position"] = 1.0   # fully open
+            elif da == indigo.kDeviceAction.TurnOff:
+                cover_kwargs["position"] = 0.0   # fully closed
+            elif da == indigo.kDeviceAction.SetBrightness:
+                pct = int(action.actionValue)
+                cover_kwargs["position"] = max(0.0, min(1.0, pct / 100.0))
+            elif da in (indigo.kDeviceAction.BrightenBy, indigo.kDeviceAction.DimBy):
+                current = dev.brightness or 0
+                delta = int(action.actionValue)
+                if da == indigo.kDeviceAction.DimBy:
+                    delta = -delta
+                pct = max(0, min(100, current + delta))
+                cover_kwargs["position"] = pct / 100.0
+            else:
+                self.logger.debug(f"Unhandled cover action {da} on {dev.name}")
+                return
+
+            def _do_cover():
+                try:
+                    client.cover_command(**cover_kwargs)
+                except Exception:
+                    self.logger.exception(f"cover_command failed for {dev.name}")
+
+            self.async_loop.call_soon_threadsafe(_do_cover)
             return
 
         self.logger.debug(f"actionControlDevice: no handler for type {dev.deviceTypeId} on {dev.name}")

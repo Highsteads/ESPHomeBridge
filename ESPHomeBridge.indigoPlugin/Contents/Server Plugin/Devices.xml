@@ -165,6 +165,91 @@
     </Device>
 
     <!-- =============================================================
+         esphomeFan - variable-speed fan
+         Modelled as a dimmer where brightness 0-100 = fan speed.
+         ESPHome scales internally to its supports_speed_levels count.
+         ============================================================= -->
+    <Device type="dimmer" id="esphomeFan">
+        <Name>ESPHome Fan</Name>
+        <ConfigUI>
+            <Field id="address" type="textfield" defaultValue="">
+                <Label>Compound Address (mac_entity):</Label>
+            </Field>
+            <Field id="nodeMac" type="textfield" defaultValue="">
+                <Label>Node MAC:</Label>
+            </Field>
+            <Field id="entityKey" type="textfield" defaultValue="">
+                <Label>Entity Key:</Label>
+            </Field>
+            <Field id="entityName" type="textfield" readonly="true" defaultValue="">
+                <Label>Entity Name:</Label>
+            </Field>
+            <Field id="speedLevels" type="textfield" readonly="true" defaultValue="">
+                <Label>Speed Levels:</Label>
+                <Description>Number of discrete speeds reported by the ESPHome fan.</Description>
+            </Field>
+            <Field id="supportsOscillation" type="checkbox" hidden="true" defaultValue="false"/>
+            <Field id="supportsDirection"   type="checkbox" hidden="true" defaultValue="false"/>
+        </ConfigUI>
+        <States>
+            <State id="oscillating">
+                <ValueType>Boolean</ValueType>
+                <TriggerLabel>Oscillating Changed</TriggerLabel>
+                <ControlPageLabel>Oscillating</ControlPageLabel>
+            </State>
+            <State id="direction">
+                <ValueType>String</ValueType>
+                <TriggerLabel>Direction Changed</TriggerLabel>
+                <ControlPageLabel>Direction</ControlPageLabel>
+            </State>
+            <State id="lastSeen">
+                <ValueType>String</ValueType>
+                <TriggerLabel>Last Seen Changed</TriggerLabel>
+                <ControlPageLabel>Last Seen</ControlPageLabel>
+            </State>
+        </States>
+    </Device>
+
+    <!-- =============================================================
+         esphomeCover - blind / shutter / garage door
+         Modelled as a dimmer where brightness = position (0 closed, 100 open).
+         ============================================================= -->
+    <Device type="dimmer" id="esphomeCover">
+        <Name>ESPHome Cover</Name>
+        <ConfigUI>
+            <Field id="address" type="textfield" defaultValue="">
+                <Label>Compound Address (mac_entity):</Label>
+            </Field>
+            <Field id="nodeMac" type="textfield" defaultValue="">
+                <Label>Node MAC:</Label>
+            </Field>
+            <Field id="entityKey" type="textfield" defaultValue="">
+                <Label>Entity Key:</Label>
+            </Field>
+            <Field id="entityName" type="textfield" readonly="true" defaultValue="">
+                <Label>Entity Name:</Label>
+            </Field>
+            <Field id="supportsPosition" type="checkbox" hidden="true" defaultValue="true"/>
+            <Field id="supportsTilt"     type="checkbox" hidden="true" defaultValue="false"/>
+            <Field id="deviceClass" type="textfield" readonly="true" defaultValue="">
+                <Label>Device Class:</Label>
+            </Field>
+        </ConfigUI>
+        <States>
+            <State id="currentOperation">
+                <ValueType>String</ValueType>
+                <TriggerLabel>Operation Changed</TriggerLabel>
+                <ControlPageLabel>Operation</ControlPageLabel>
+            </State>
+            <State id="lastSeen">
+                <ValueType>String</ValueType>
+                <TriggerLabel>Last Seen Changed</TriggerLabel>
+                <ControlPageLabel>Last Seen</ControlPageLabel>
+            </State>
+        </States>
+    </Device>
+
+    <!-- =============================================================
          esphomeLight - dimmer/CT/RGB light
          ============================================================= -->
     <Device type="dimmer" id="esphomeLight">

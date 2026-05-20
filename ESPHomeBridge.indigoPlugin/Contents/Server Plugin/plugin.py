@@ -6,7 +6,7 @@
 #              maps each ESPHome entity to a native Indigo device.
 # Author:      CliveS & Claude Opus 4.7
 # Date:        20-05-2026
-# Version:     0.4.0
+# Version:     0.4.1
 
 try:
     import indigo
@@ -15,6 +15,7 @@ except ImportError:
 
 import asyncio
 import json
+import math
 import os
 import re
 import sys
@@ -39,7 +40,7 @@ except ImportError:
 # ============================================================
 
 PLUGIN_ID      = "com.clives.indigoplugin.esphomebridge"
-PLUGIN_VERSION = "0.4.0"
+PLUGIN_VERSION = "0.4.1"
 
 DEVICE_FOLDER_NAME = "ESPHome"
 
@@ -796,8 +797,14 @@ class Plugin(indigo.PluginBase):
             try:
                 val = float(state.state)
                 unit = info.get("unit", "")
-                dev.updateStateOnServer(state_id, val,
-                    uiValue=(f"{val:g} {unit}" if unit else f"{val:g}"))
+                # 2 decimal places for all numeric sensor displays. NaN
+                # (e.g. power_factor when current=0) renders as "nan" —
+                # leave that alone, it's a useful "undefined" signal.
+                if math.isnan(val):
+                    ui = "nan"
+                else:
+                    ui = f"{val:.2f} {unit}".rstrip() if unit else f"{val:.2f}"
+                dev.updateStateOnServer(state_id, val, uiValue=ui)
             except (TypeError, ValueError):
                 dev.updateStateOnServer(state_id, str(state.state))
         elif isinstance(state, TextSensorState):

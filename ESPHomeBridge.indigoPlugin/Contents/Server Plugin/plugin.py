@@ -6,7 +6,7 @@
 #              maps each ESPHome entity to a native Indigo device.
 # Author:      CliveS & Claude Opus 4.7
 # Date:        20-05-2026
-# Version:     0.4.1
+# Version:     0.4.2
 
 try:
     import indigo
@@ -40,7 +40,7 @@ except ImportError:
 # ============================================================
 
 PLUGIN_ID      = "com.clives.indigoplugin.esphomebridge"
-PLUGIN_VERSION = "0.4.1"
+PLUGIN_VERSION = "0.4.2"
 
 DEVICE_FOLDER_NAME = "ESPHome"
 
@@ -795,15 +795,20 @@ class Plugin(indigo.PluginBase):
             if getattr(state, "missing_state", False):
                 return
             try:
-                val = float(state.state)
+                raw = float(state.state)
                 unit = info.get("unit", "")
-                # 2 decimal places for all numeric sensor displays. NaN
-                # (e.g. power_factor when current=0) renders as "nan" —
-                # leave that alone, it's a useful "undefined" signal.
-                if math.isnan(val):
-                    ui = "nan"
+                # Round the RAW stored value to 2dp. Indigo's Custom States
+                # panel displays the raw state, not the .ui suffix — so to
+                # get clean readings (33.60 kWh not 33.59825134277344) the
+                # raw value itself has to be rounded. Pre-0.4.2 stored
+                # full float precision which buried the user under digits.
+                # NaN (e.g. power_factor when current=0) preserved as-is.
+                if math.isnan(raw):
+                    val = raw
+                    ui  = "nan"
                 else:
-                    ui = f"{val:.2f} {unit}".rstrip() if unit else f"{val:.2f}"
+                    val = round(raw, 2)
+                    ui  = f"{val:.2f} {unit}".rstrip() if unit else f"{val:.2f}"
                 dev.updateStateOnServer(state_id, val, uiValue=ui)
             except (TypeError, ValueError):
                 dev.updateStateOnServer(state_id, str(state.state))

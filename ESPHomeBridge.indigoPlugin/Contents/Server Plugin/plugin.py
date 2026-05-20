@@ -5,8 +5,8 @@
 #              Auto-discovers via mDNS, connects per device via aioesphomeapi,
 #              maps each ESPHome entity to a native Indigo device.
 # Author:      CliveS & Claude Opus 4.7
-# Date:        19-05-2026
-# Version:     0.1.0
+# Date:        20-05-2026
+# Version:     0.3.0
 
 try:
     import indigo
@@ -37,7 +37,7 @@ except ImportError:
 # ============================================================
 
 PLUGIN_ID      = "com.clives.indigoplugin.esphomebridge"
-PLUGIN_VERSION = "0.1.0"
+PLUGIN_VERSION = "0.3.0"
 
 DEVICE_FOLDER_NAME = "ESPHome"
 

@@ -450,10 +450,23 @@ class Plugin(indigo.PluginBase):
                 return
             dev.updateStateOnServer("valueText", str(state.state))
         elif isinstance(state, LightState):
-            dev.updateStateOnServer("onOffState", bool(state.state))
-            if state.brightness is not None:
-                # ESPHome brightness is 0.0-1.0; Indigo wants 0-100
-                dev.updateStateOnServer("brightnessLevel", int(round(state.brightness * 100)))
+            on = bool(state.state)
+            # When off, force brightnessLevel to 0. Indigo's dimmer
+            # semantics auto-correct onOffState based on brightness, so
+            # writing brightness=75 while onState=False would leave
+            # onState=True. Keep both in lockstep.
+            if on and state.brightness is not None:
+                dev.updateStatesOnServer([
+                    {"key": "onOffState",      "value": True},
+                    {"key": "brightnessLevel", "value": int(round(state.brightness * 100))},
+                ])
+            elif on:
+                dev.updateStateOnServer("onOffState", True)
+            else:
+                dev.updateStatesOnServer([
+                    {"key": "onOffState",      "value": False},
+                    {"key": "brightnessLevel", "value": 0},
+                ])
             if hasattr(state, "color_temperature") and state.color_temperature:
                 dev.updateStateOnServer("colorTemp", int(state.color_temperature))
 
@@ -654,13 +667,27 @@ class Plugin(indigo.PluginBase):
             return
 
         if dev.deviceTypeId == "esphomeLight":
+            # Empirically, ESPHome's light_command(state=False) without
+            # an explicit brightness can be silently dropped on some
+            # light types (monochromatic + default_transition_length).
+            # Always send brightness alongside state for unambiguous intent.
             kwargs = {"key": key}
             if da == indigo.kDeviceAction.TurnOn:
                 kwargs["state"] = True
+                # Restore previous brightness if known, else full
+                last = dev.brightness or 100
+                kwargs["brightness"] = max(last, 1) / 100.0
             elif da == indigo.kDeviceAction.TurnOff:
                 kwargs["state"] = False
+                kwargs["brightness"] = 0.0
             elif da == indigo.kDeviceAction.Toggle:
-                kwargs["state"] = not bool(dev.onState)
+                new_state = not bool(dev.onState)
+                kwargs["state"] = new_state
+                if new_state:
+                    last = dev.brightness or 100
+                    kwargs["brightness"] = max(last, 1) / 100.0
+                else:
+                    kwargs["brightness"] = 0.0
             elif da == indigo.kDeviceAction.SetBrightness:
                 level = int(action.actionValue)
                 kwargs["state"] = level > 0

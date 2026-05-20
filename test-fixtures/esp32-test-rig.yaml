@@ -21,10 +21,11 @@ esp32:
   framework:
     type: arduino
 
-# WiFi - put your SSID + password here or use the captive portal on first boot
+# WiFi — no creds in the YAML, intentional. On first boot the device
+# starts the AP defined below; user joins it from a phone, configures
+# the real SSID via the captive portal. After that, credentials are
+# stored in flash and the AP only re-appears on connection failure.
 wifi:
-  ssid: "Highsteads_IOT"      # adjust as needed
-  password: ""                # adjust as needed
   ap:
     ssid: "ESPHome-TestRig-AP"
     password: "12345678"

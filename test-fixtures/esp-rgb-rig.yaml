@@ -1,0 +1,172 @@
+# ESP32 test rig for validating RGB / RGBWW / CT light entities in
+# ESPHomeBridge. Exposes three different light platforms so we can
+# exercise every code path in _apply_state_to_device's LightState
+# branch and the SetColorLevels action handler in actionControlDevice.
+#
+# Companion to esp32-test-rig.yaml (switches / dimmers / fans / covers).
+# Reflash to this YAML on a separate ESP32 board.
+
+substitutions:
+  device_name: esphome-rgb-rig
+  friendly_name: ESPHome RGB Test Rig
+
+esphome:
+  name: ${device_name}
+  friendly_name: ${friendly_name}
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+# WiFi setup via captive portal on first boot (no creds in YAML)
+wifi:
+  ap:
+    ssid: "ESPHome-RGB-AP"
+    password: "12345678"
+
+captive_portal:
+
+# API - no encryption for initial bring-up
+api:
+  reboot_timeout: 0s
+
+# OTA so we can iterate without USB after first flash
+ota:
+  - platform: esphome
+    password: "indigotestrig"
+
+# Web UI fallback (port 80)
+web_server:
+  port: 80
+  version: 3
+
+logger:
+  level: INFO
+
+# ---- Dummy outputs (each light needs its own) ----
+output:
+  # RGB light outputs
+  - platform: template
+    id: rgb_red
+    type: float
+    write_action:
+      - logger.log:
+          format: "RGB Red=%.2f"
+          args: ["state"]
+  - platform: template
+    id: rgb_green
+    type: float
+    write_action:
+      - logger.log:
+          format: "RGB Green=%.2f"
+          args: ["state"]
+  - platform: template
+    id: rgb_blue
+    type: float
+    write_action:
+      - logger.log:
+          format: "RGB Blue=%.2f"
+          args: ["state"]
+
+  # CT light outputs
+  - platform: template
+    id: ct_cold
+    type: float
+    write_action:
+      - logger.log:
+          format: "CT Cold=%.2f"
+          args: ["state"]
+  - platform: template
+    id: ct_warm
+    type: float
+    write_action:
+      - logger.log:
+          format: "CT Warm=%.2f"
+          args: ["state"]
+
+  # RGBWW outputs (independent set so the RGB light and RGBWW light
+  # don't share state)
+  - platform: template
+    id: rgbww_red
+    type: float
+    write_action:
+      - logger.log:
+          format: "RGBWW Red=%.2f"
+          args: ["state"]
+  - platform: template
+    id: rgbww_green
+    type: float
+    write_action:
+      - logger.log:
+          format: "RGBWW Green=%.2f"
+          args: ["state"]
+  - platform: template
+    id: rgbww_blue
+    type: float
+    write_action:
+      - logger.log:
+          format: "RGBWW Blue=%.2f"
+          args: ["state"]
+  - platform: template
+    id: rgbww_cw
+    type: float
+    write_action:
+      - logger.log:
+          format: "RGBWW CW=%.2f"
+          args: ["state"]
+  - platform: template
+    id: rgbww_ww
+    type: float
+    write_action:
+      - logger.log:
+          format: "RGBWW WW=%.2f"
+          args: ["state"]
+
+# ---- Three light entities of three different platforms ----
+light:
+  # Pure RGB (no white channel)
+  - platform: rgb
+    name: "Test RGB Light"
+    id: test_rgb
+    red:   rgb_red
+    green: rgb_green
+    blue:  rgb_blue
+    default_transition_length: 0s
+
+  # Colour-temperature white only (no RGB)
+  - platform: cwww
+    name: "Test CT Light"
+    id: test_ct
+    cold_white: ct_cold
+    warm_white: ct_warm
+    cold_white_color_temperature: 6500 K
+    warm_white_color_temperature: 2000 K
+    default_transition_length: 0s
+
+  # RGB + cold/warm white (most complex - full RGBWW colour space)
+  - platform: rgbww
+    name: "Test RGBWW Light"
+    id: test_rgbww
+    red:        rgbww_red
+    green:      rgbww_green
+    blue:       rgbww_blue
+    cold_white: rgbww_cw
+    warm_white: rgbww_ww
+    cold_white_color_temperature: 6500 K
+    warm_white_color_temperature: 2000 K
+    default_transition_length: 0s
+
+# Diagnostic sensors
+sensor:
+  - platform: uptime
+    name: "Uptime"
+    update_interval: 60s
+
+  - platform: wifi_signal
+    name: "WiFi RSSI"
+    update_interval: 60s
+
+text_sensor:
+  - platform: version
+    name: "ESPHome Version"

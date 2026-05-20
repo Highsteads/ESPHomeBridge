@@ -1,0 +1,122 @@
+# ESP32 test rig for "lesser" entity types in ESPHome.
+# Exercises: lock, button (as press trigger), number (settable
+# numeric value), select (settable enum), date, time.
+# Used to validate the (yet-to-be-added) esphomeLock / esphomeButton
+# device types and Number/Select control flows.
+
+substitutions:
+  device_name: esphome-buttons-rig
+  friendly_name: ESPHome Buttons & Lock Test Rig
+
+esphome:
+  name: ${device_name}
+  friendly_name: ${friendly_name}
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+wifi:
+  ap:
+    ssid: "ESPHome-Btn-AP"
+    password: "12345678"
+
+captive_portal:
+
+api:
+  reboot_timeout: 0s
+
+ota:
+  - platform: esphome
+    password: "indigotestrig"
+
+web_server:
+  port: 80
+  version: 3
+
+logger:
+  level: INFO
+
+globals:
+  - id: lock_state
+    type: bool
+    initial_value: 'true'   # start locked
+  - id: number_value
+    type: float
+    initial_value: '42.0'
+
+# Lock entity
+lock:
+  - platform: template
+    name: "Test Lock"
+    id: test_lock
+    optimistic: true
+    lambda: |-
+      return id(lock_state) ? LOCK_STATE_LOCKED : LOCK_STATE_UNLOCKED;
+    lock_action:
+      - lambda: 'id(lock_state) = true;'
+      - logger.log: "Lock: locked"
+    unlock_action:
+      - lambda: 'id(lock_state) = false;'
+      - logger.log: "Lock: unlocked"
+
+# Pushbutton entities (no state, just fire on press)
+button:
+  - platform: template
+    name: "Test Button 1"
+    on_press:
+      - logger.log: "Button 1 pressed"
+  - platform: template
+    name: "Test Button 2"
+    on_press:
+      - logger.log: "Button 2 pressed"
+  - platform: restart
+    name: "Restart Device"
+
+# Settable number entity (slider in Indigo)
+number:
+  - platform: template
+    name: "Test Number"
+    id: test_number
+    min_value: 0
+    max_value: 100
+    step: 1
+    initial_value: 42
+    optimistic: true
+    set_action:
+      - lambda: 'id(number_value) = x;'
+      - logger.log:
+          format: "Number set to %.0f"
+          args: ["x"]
+
+# Settable enum (dropdown in Indigo)
+select:
+  - platform: template
+    name: "Test Mode"
+    id: test_mode
+    options:
+      - "Auto"
+      - "Manual"
+      - "Off"
+    initial_option: "Auto"
+    optimistic: true
+    set_action:
+      - logger.log:
+          format: "Mode set to %s"
+          args: ["x.c_str()"]
+
+# Diagnostic sensors
+sensor:
+  - platform: template
+    name: "Number Reading"
+    lambda: 'return id(number_value);'
+    update_interval: 10s
+
+  - platform: uptime
+    name: "Uptime"
+    update_interval: 60s
+
+  - platform: wifi_signal
+    name: "WiFi RSSI"
+    update_interval: 60s

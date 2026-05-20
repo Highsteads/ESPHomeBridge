@@ -1,0 +1,61 @@
+# ESP32 test rig with API encryption ENABLED. Validates the
+# encryption-key flow in ESPHomeBridge — both the PluginConfig
+# default key path and the per-device pluginProps override.
+#
+# Encryption key below is a TEST KEY for this dev rig only.
+# Generated with: openssl rand -base64 32
+#                 -> ESPHomeBridge plugin's "Default Encryption Key"
+#                 -> or this device's encryptionKey pluginProp
+
+substitutions:
+  device_name: esphome-encrypted-rig
+  friendly_name: ESPHome Encrypted Test Rig
+
+esphome:
+  name: ${device_name}
+  friendly_name: ${friendly_name}
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+wifi:
+  ap:
+    ssid: "ESPHome-Enc-AP"
+    password: "12345678"
+
+captive_portal:
+
+api:
+  encryption:
+    key: "GHKLgZNS35BzKnXUOehShEy/jjvfYZRP5ZHcA9hPpws="
+  reboot_timeout: 0s
+
+ota:
+  - platform: esphome
+    password: "indigotestrig"
+
+web_server:
+  port: 80
+  version: 3
+
+logger:
+  level: INFO
+
+# Minimal entities — just enough to confirm the encrypted handshake
+# works end-to-end (we already exercise full entity coverage on the
+# other test rigs).
+switch:
+  - platform: template
+    name: "Encrypted Test Switch"
+    optimistic: true
+
+sensor:
+  - platform: uptime
+    name: "Uptime"
+    update_interval: 30s
+
+  - platform: wifi_signal
+    name: "WiFi RSSI"
+    update_interval: 30s

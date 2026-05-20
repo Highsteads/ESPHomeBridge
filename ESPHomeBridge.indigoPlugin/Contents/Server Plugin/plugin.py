@@ -6,7 +6,7 @@
 #              maps each ESPHome entity to a native Indigo device.
 # Author:      CliveS & Claude Opus 4.7
 # Date:        20-05-2026
-# Version:     0.4.2
+# Version:     0.4.3
 
 try:
     import indigo
@@ -40,7 +40,7 @@ except ImportError:
 # ============================================================
 
 PLUGIN_ID      = "com.clives.indigoplugin.esphomebridge"
-PLUGIN_VERSION = "0.4.2"
+PLUGIN_VERSION = "0.4.3"
 
 DEVICE_FOLDER_NAME = "ESPHome"
 
@@ -279,6 +279,28 @@ class Plugin(indigo.PluginBase):
         if not out or not out[0].isalpha():
             out = "x" + out
         return out
+
+    def _format_seconds(self, secs):
+        """Format an integer seconds value as 'Xd Xh Xm Xs', matching the
+        style Athom's text-uptime sensor uses ('3h 5m 2s'). Days only show
+        if >= 1, hours only if >= 1 or days present, etc. Always shows
+        seconds so values < 60s aren't blank."""
+        try:
+            secs = int(secs)
+        except (TypeError, ValueError):
+            return str(secs)
+        d, rem = divmod(secs, 86400)
+        h, rem = divmod(rem, 3600)
+        m, s   = divmod(rem, 60)
+        parts = []
+        if d:
+            parts.append(f"{d}d")
+        if h or d:
+            parts.append(f"{h}h")
+        if m or h or d:
+            parts.append(f"{m}m")
+        parts.append(f"{s}s")
+        return " ".join(parts)
 
     def _classify_node_type(self, entities):
         """Pick the Indigo deviceTypeId for a node based on its entities.
@@ -797,16 +819,21 @@ class Plugin(indigo.PluginBase):
             try:
                 raw = float(state.state)
                 unit = info.get("unit", "")
-                # Round the RAW stored value to 2dp. Indigo's Custom States
-                # panel displays the raw state, not the .ui suffix — so to
-                # get clean readings (33.60 kWh not 33.59825134277344) the
-                # raw value itself has to be rounded. Pre-0.4.2 stored
-                # full float precision which buried the user under digits.
-                # NaN (e.g. power_factor when current=0) preserved as-is.
                 if math.isnan(raw):
                     val = raw
                     ui  = "nan"
+                elif unit == "s":
+                    # Sensor reports seconds (uptime, runtime, etc). Keep
+                    # the raw stored value as integer seconds — useful for
+                    # script logic ("uptime > 86400") — but show a
+                    # human-readable Xd Xh Xm Xs in the .ui.
+                    val = int(round(raw))
+                    ui  = self._format_seconds(val)
                 else:
+                    # Round the RAW stored value to 2dp. Indigo's Custom
+                    # States panel displays the raw state, not the .ui
+                    # suffix — so for clean readings (33.60 kWh, not
+                    # 33.59825134277344) the raw itself has to be rounded.
                     val = round(raw, 2)
                     ui  = f"{val:.2f} {unit}".rstrip() if unit else f"{val:.2f}"
                 dev.updateStateOnServer(state_id, val, uiValue=ui)

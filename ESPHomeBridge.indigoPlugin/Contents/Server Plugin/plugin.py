@@ -6,7 +6,7 @@
 #              maps each ESPHome entity to a native Indigo device.
 # Author:      CliveS & Claude Opus 4.7
 # Date:        20-05-2026
-# Version:     0.4.3
+# Version:     0.4.4
 
 try:
     import indigo
@@ -40,7 +40,7 @@ except ImportError:
 # ============================================================
 
 PLUGIN_ID      = "com.clives.indigoplugin.esphomebridge"
-PLUGIN_VERSION = "0.4.3"
+PLUGIN_VERSION = "0.4.4"
 
 DEVICE_FOLDER_NAME = "ESPHome"
 
@@ -409,6 +409,11 @@ class Plugin(indigo.PluginBase):
             out[state_id] = info
         return out
 
+    # Node-info states that the plugin populates itself from mDNS /
+    # device_info (not from any ESPHome entity). Always added unless
+    # the firmware also exposes a same-named entity (avoids duplicates).
+    _NODE_INFO_STATES = ("ipAddress", "macAddress", "boardModel", "esphomeVersion")
+
     def getDeviceStateList(self, dev):
         """Add dynamic states declared in pluginProps.entityKeyMap to the
         base state list from Devices.xml. Per Indigo's gotcha rules
@@ -422,7 +427,13 @@ class Plugin(indigo.PluginBase):
         try:
             em = json.loads(dev.pluginProps.get("entityKeyMap", "") or "{}")
         except Exception:
-            return state_list
+            em = {}
+        # Add node-info states (ipAddress, macAddress, etc.) unless the
+        # firmware exposes its own same-named entity that would conflict.
+        for sid in self._NODE_INFO_STATES:
+            if sid in em:
+                continue
+            state_list.append(self.getDeviceStateDictForStringType(sid, sid, sid))
         for sid, info in em.items():
             if sid == "primary":
                 continue  # primary's data goes to native states (onOffState etc)
@@ -1171,6 +1182,7 @@ class Plugin(indigo.PluginBase):
                     existing.stateListOrDisplayStateIdChanged()
                     existing.updateStateOnServer("connected", True)
                     existing.updateStateOnServer("status",    "Online")
+                    self._write_node_info_states(existing, mac, ip, board, esp_v, entity_key_map)
                 except Exception as exc:
                     self.logger.debug(f"props/state update failed for {mac}: {exc}")
                 self.nodes_by_mac[mac] = existing
@@ -1209,6 +1221,7 @@ class Plugin(indigo.PluginBase):
             dev.stateListOrDisplayStateIdChanged()
             dev.updateStateOnServer("connected", True)
             dev.updateStateOnServer("status",    "Online")
+            self._write_node_info_states(dev, mac, ip, board, esp_v, entity_key_map)
             self.nodes_by_mac[mac] = dev
             self.logger.info(
                 f"Created Indigo device: {dev.name} ({mac}) type={type_id} "
@@ -1274,6 +1287,37 @@ class Plugin(indigo.PluginBase):
                 "SupportsHvacFanMode":     bool(getattr(primary_entity, "supported_fan_modes", []) or []),
             }
         return {}
+
+    def _write_node_info_states(self, dev, mac, ip, board, esp_v, entity_key_map):
+        """Populate the plugin-supplied node info states (ipAddress,
+        macAddress, boardModel, esphomeVersion). These mirror what the
+        Athom firmware exposes via dedicated entities but apply to any
+        node regardless of what its YAML chose to expose.
+
+        If the firmware does export an entity with the same state_id
+        (e.g. Athom's IP Address text sensor maps to "ipAddress"), the
+        entity write will overwrite ours on the next state update —
+        which is what we want (the entity might be more up-to-date if
+        the device gets a new DHCP lease).
+        """
+        # Format the bare MAC ("8CCE4E574F8D") as the colon-separated
+        # form humans expect ("8C:CE:4E:57:4F:8D")
+        formatted_mac = ":".join(mac[i:i+2] for i in range(0, len(mac), 2)) if mac else ""
+        updates = []
+        for sid, val in (
+            ("ipAddress",      ip or ""),
+            ("macAddress",     formatted_mac),
+            ("boardModel",     board or ""),
+            ("esphomeVersion", esp_v or ""),
+        ):
+            if sid in entity_key_map:
+                continue   # firmware-driven entity wins
+            updates.append({"key": sid, "value": str(val)})
+        if updates:
+            try:
+                dev.updateStatesOnServer(updates)
+            except Exception as exc:
+                self.logger.debug(f"node info state write failed for {mac}: {exc}")
 
     def _migration_saved_keys(self):
         """Read the v0.4.0 migration's saved encryption-key snapshot."""

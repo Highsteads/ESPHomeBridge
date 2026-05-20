@@ -647,7 +647,9 @@ class Plugin(indigo.PluginBase):
                 extra_props["SupportsWhiteTemperature"] = 11 in modes or 27 in modes
             elif isinstance(e, FanInfo):
                 type_id = "esphomeFan"
-                extra_props["speedLevels"]          = str(getattr(e, "supported_speed_levels", 0) or 0)
+                # aioesphomeapi's attribute is `supported_speed_count` (not
+                # `supported_speed_levels` despite the protobuf field naming).
+                extra_props["speedLevels"]          = str(getattr(e, "supported_speed_count", 0) or 0)
                 extra_props["supportsOscillation"]  = bool(getattr(e, "supports_oscillation", False))
                 extra_props["supportsDirection"]    = bool(getattr(e, "supports_direction", False))
             elif isinstance(e, CoverInfo):

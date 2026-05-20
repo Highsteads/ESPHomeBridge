@@ -250,6 +250,171 @@
     </Device>
 
     <!-- =============================================================
+         esphomeLock - lock entity (relay class)
+         onState=True means LOCKED. TurnOn=lock, TurnOff=unlock.
+         ============================================================= -->
+    <Device type="relay" id="esphomeLock">
+        <Name>ESPHome Lock</Name>
+        <ConfigUI>
+            <Field id="address" type="textfield" defaultValue="">
+                <Label>Compound Address (mac_entity):</Label>
+            </Field>
+            <Field id="nodeMac" type="textfield" defaultValue="">
+                <Label>Node MAC:</Label>
+            </Field>
+            <Field id="entityKey" type="textfield" defaultValue="">
+                <Label>Entity Key:</Label>
+            </Field>
+            <Field id="entityName" type="textfield" readonly="true" defaultValue="">
+                <Label>Entity Name:</Label>
+            </Field>
+            <Field id="supportsOpen" type="checkbox" hidden="true" defaultValue="false"/>
+            <Field id="requiresCode" type="checkbox" hidden="true" defaultValue="false"/>
+        </ConfigUI>
+        <States>
+            <State id="lockState">
+                <ValueType>String</ValueType>
+                <TriggerLabel>Lock State Changed</TriggerLabel>
+                <ControlPageLabel>Lock State</ControlPageLabel>
+            </State>
+            <State id="lastSeen">
+                <ValueType>String</ValueType>
+                <TriggerLabel>Last Seen Changed</TriggerLabel>
+                <ControlPageLabel>Last Seen</ControlPageLabel>
+            </State>
+        </States>
+    </Device>
+
+    <!-- =============================================================
+         esphomeNumber - settable numeric entity (slider in Indigo
+         via the Set Number Value custom action)
+         ============================================================= -->
+    <Device type="custom" id="esphomeNumber">
+        <Name>ESPHome Number</Name>
+        <ConfigUI>
+            <Field id="address" type="textfield" defaultValue="">
+                <Label>Compound Address (mac_entity):</Label>
+            </Field>
+            <Field id="nodeMac" type="textfield" defaultValue="">
+                <Label>Node MAC:</Label>
+            </Field>
+            <Field id="entityKey" type="textfield" defaultValue="">
+                <Label>Entity Key:</Label>
+            </Field>
+            <Field id="entityName" type="textfield" readonly="true" defaultValue="">
+                <Label>Entity Name:</Label>
+            </Field>
+            <Field id="minValue" type="textfield" readonly="true" defaultValue=""><Label>Min:</Label></Field>
+            <Field id="maxValue" type="textfield" readonly="true" defaultValue=""><Label>Max:</Label></Field>
+            <Field id="step"     type="textfield" readonly="true" defaultValue=""><Label>Step:</Label></Field>
+            <Field id="unit"     type="textfield" readonly="true" defaultValue=""><Label>Unit:</Label></Field>
+        </ConfigUI>
+        <States>
+            <State id="value">
+                <ValueType>Number</ValueType>
+                <TriggerLabel>Value Changed</TriggerLabel>
+                <ControlPageLabel>Value</ControlPageLabel>
+            </State>
+            <State id="lastSeen">
+                <ValueType>String</ValueType>
+                <TriggerLabel>Last Seen Changed</TriggerLabel>
+                <ControlPageLabel>Last Seen</ControlPageLabel>
+            </State>
+        </States>
+        <UiDisplayStateId>value</UiDisplayStateId>
+    </Device>
+
+    <!-- =============================================================
+         esphomeSelect - enum entity (dropdown via Set Select Option
+         custom action)
+         ============================================================= -->
+    <Device type="custom" id="esphomeSelect">
+        <Name>ESPHome Select</Name>
+        <ConfigUI>
+            <Field id="address" type="textfield" defaultValue="">
+                <Label>Compound Address (mac_entity):</Label>
+            </Field>
+            <Field id="nodeMac" type="textfield" defaultValue="">
+                <Label>Node MAC:</Label>
+            </Field>
+            <Field id="entityKey" type="textfield" defaultValue="">
+                <Label>Entity Key:</Label>
+            </Field>
+            <Field id="entityName" type="textfield" readonly="true" defaultValue="">
+                <Label>Entity Name:</Label>
+            </Field>
+            <Field id="options" type="textfield" readonly="true" defaultValue=""><Label>Options:</Label></Field>
+        </ConfigUI>
+        <States>
+            <State id="selected">
+                <ValueType>String</ValueType>
+                <TriggerLabel>Selection Changed</TriggerLabel>
+                <ControlPageLabel>Selected Option</ControlPageLabel>
+            </State>
+            <State id="lastSeen">
+                <ValueType>String</ValueType>
+                <TriggerLabel>Last Seen Changed</TriggerLabel>
+                <ControlPageLabel>Last Seen</ControlPageLabel>
+            </State>
+        </States>
+        <UiDisplayStateId>selected</UiDisplayStateId>
+    </Device>
+
+    <!-- =============================================================
+         esphomeClimate - HVAC / thermostat
+         ============================================================= -->
+    <Device type="thermostat" id="esphomeClimate">
+        <Name>ESPHome Climate</Name>
+        <ConfigUI>
+            <Field id="address" type="textfield" defaultValue="">
+                <Label>Compound Address (mac_entity):</Label>
+            </Field>
+            <Field id="nodeMac" type="textfield" defaultValue="">
+                <Label>Node MAC:</Label>
+            </Field>
+            <Field id="entityKey" type="textfield" defaultValue="">
+                <Label>Entity Key:</Label>
+            </Field>
+            <Field id="entityName" type="textfield" readonly="true" defaultValue="">
+                <Label>Entity Name:</Label>
+            </Field>
+            <Field id="visualMin" type="textfield" readonly="true" defaultValue="">
+                <Label>Min Temp:</Label>
+            </Field>
+            <Field id="visualMax" type="textfield" readonly="true" defaultValue="">
+                <Label>Max Temp:</Label>
+            </Field>
+            <Field id="supportedModes" type="textfield" readonly="true" defaultValue="">
+                <Label>Modes:</Label>
+            </Field>
+            <Field id="twoPoint" type="checkbox" hidden="true" defaultValue="false"/>
+            <Field id="NumTemperatureInputs" type="textfield" hidden="true" defaultValue="1"/>
+            <Field id="NumHumidityInputs"    type="textfield" hidden="true" defaultValue="0"/>
+            <Field id="SupportsHeatSetpoint" type="checkbox" hidden="true" defaultValue="true"/>
+            <Field id="SupportsCoolSetpoint" type="checkbox" hidden="true" defaultValue="true"/>
+            <Field id="SupportsHvacOperationMode" type="checkbox" hidden="true" defaultValue="true"/>
+            <Field id="SupportsHvacFanMode"  type="checkbox" hidden="true" defaultValue="false"/>
+        </ConfigUI>
+        <States>
+            <State id="action">
+                <ValueType>String</ValueType>
+                <TriggerLabel>HVAC Action Changed</TriggerLabel>
+                <ControlPageLabel>Action</ControlPageLabel>
+            </State>
+            <State id="preset">
+                <ValueType>String</ValueType>
+                <TriggerLabel>Preset Changed</TriggerLabel>
+                <ControlPageLabel>Preset</ControlPageLabel>
+            </State>
+            <State id="lastSeen">
+                <ValueType>String</ValueType>
+                <TriggerLabel>Last Seen Changed</TriggerLabel>
+                <ControlPageLabel>Last Seen</ControlPageLabel>
+            </State>
+        </States>
+    </Device>
+
+    <!-- =============================================================
          esphomeLight - dimmer/CT/RGB light
          ============================================================= -->
     <Device type="dimmer" id="esphomeLight">

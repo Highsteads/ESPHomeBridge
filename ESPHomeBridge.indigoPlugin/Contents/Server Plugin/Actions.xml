@@ -1,4 +1,47 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <Actions>
-    <!-- Per-device custom actions added as needed -->
+
+    <Action id="setNumberValue" deviceFilter="self.esphomeNumber">
+        <Name>Set Number Value</Name>
+        <CallbackMethod>actionSetNumberValue</CallbackMethod>
+        <ConfigUI>
+            <Field id="value" type="textfield" defaultValue="0">
+                <Label>Value:</Label>
+                <Description>New numeric value (within the entity's min/max range as shown in Configure dialog)</Description>
+            </Field>
+        </ConfigUI>
+    </Action>
+
+    <Action id="setSelectOption" deviceFilter="self.esphomeSelect">
+        <Name>Set Select Option</Name>
+        <CallbackMethod>actionSetSelectOption</CallbackMethod>
+        <ConfigUI>
+            <Field id="option" type="textfield" defaultValue="">
+                <Label>Option:</Label>
+                <Description>Must exactly match one of the options shown in the Configure dialog</Description>
+            </Field>
+        </ConfigUI>
+    </Action>
+
+    <Action id="lockOpen" deviceFilter="self.esphomeLock">
+        <Name>Lock - Open (latch release)</Name>
+        <CallbackMethod>actionLockOpen</CallbackMethod>
+        <ConfigUI>
+            <Field id="info" type="label">
+                <Label>For locks that support latch-release (electric strike). Sends the OPEN command rather than LOCK/UNLOCK. Use only on devices whose YAML has supports_open=true.</Label>
+            </Field>
+        </ConfigUI>
+    </Action>
+
+    <Action id="pressButton" deviceFilter="self.esphomeNode">
+        <Name>Press ESPHome Button</Name>
+        <CallbackMethod>actionPressButton</CallbackMethod>
+        <ConfigUI>
+            <Field id="entityKey" type="textfield" defaultValue="">
+                <Label>Button Entity Key:</Label>
+                <Description>The numeric key of the button entity (find via Plugins -> ESPHome Bridge -> Dump All Entities to Log). Buttons are stateless; this triggers the button's on_press action on the device.</Description>
+            </Field>
+        </ConfigUI>
+    </Action>
+
 </Actions>

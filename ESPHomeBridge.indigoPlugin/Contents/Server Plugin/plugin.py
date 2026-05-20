@@ -310,15 +310,15 @@ class Plugin(indigo.PluginBase):
         if not d:
             return
 
-        # Resolve encryption key: per-device first, fall back to plugin default
-        node_dev = self._find_node_device(mac)
-        per_device_key = node_dev.pluginProps.get("encryptionKey", "") if node_dev else ""
-        encryption_key = per_device_key or self.default_encryption_key or None
-
         self.connections[mac] = {"client": None, "info": None, "entities": {}}
         backoff = RECONNECT_BACKOFF_INITIAL
 
         while True:
+            # Resolve encryption key fresh on each iteration so a key clear
+            # (e.g. after a "device is plaintext" error) takes effect on retry
+            node_dev = self._find_node_device(mac)
+            per_device_key = node_dev.pluginProps.get("encryptionKey", "") if node_dev else ""
+            encryption_key = per_device_key or self.default_encryption_key or None
             client = APIClient(
                 d["ip"], d["port"], password=None,
                 noise_psk=encryption_key,
@@ -368,10 +368,43 @@ class Plugin(indigo.PluginBase):
             except InvalidAuthAPIError:
                 self.logger.error(
                     f"{mac}: invalid API encryption key. Set the correct key in "
-                    "the device's Configure dialog or in the plugin's default key."
+                    "the device's Configure dialog or in the plugin's default key. "
+                    "Plugin will retry on next restart."
                 )
+                self._update_node_status(mac, connected=False, status="Bad key")
                 return  # don't keep retrying with bad key
             except (APIConnectionError, OSError, ConnectionError) as exc:
+                msg = str(exc).lower()
+                # Device is plaintext but we sent encryption handshake.
+                # Means a stale / wrong key is on this device's pluginProps.
+                # Auto-clear it and retry — this self-heals freezer-plug-style
+                # regressions where a key was accidentally written to a
+                # plaintext device.
+                if "using plaintext" in msg or "plaintext protocol" in msg:
+                    self.logger.warning(
+                        f"{mac}: device is plaintext but had an encryption key set. "
+                        "Auto-clearing the key and retrying without encryption."
+                    )
+                    if node_dev:
+                        try:
+                            props = dict(node_dev.pluginProps)
+                            props["encryptionKey"] = ""
+                            node_dev.replacePluginPropsOnServer(props)
+                        except Exception as clear_exc:
+                            self.logger.debug(f"failed to clear key: {clear_exc}")
+                    backoff = RECONNECT_BACKOFF_INITIAL
+                    continue   # immediate retry — next loop reads fresh key (empty now)
+
+                # 'Connection requires encryption' = device has API encryption
+                # set but we have no key for it. Give up rather than spam logs.
+                if "requires encryption" in msg or ("encryption" in msg and "wrong" in msg):
+                    self.logger.error(
+                        f"{mac}: {exc}. No usable encryption key. Set one in the "
+                        "device's Configure dialog and restart the plugin. "
+                        "Plugin will not retry until then."
+                    )
+                    self._update_node_status(mac, connected=False, status="Needs encryption key")
+                    return
                 self.logger.warning(f"{mac}: connection error: {exc}; reconnect in {backoff}s")
             except asyncio.CancelledError:
                 self.logger.debug(f"{mac}: connection task cancelled")
@@ -427,11 +460,32 @@ class Plugin(indigo.PluginBase):
         except Exception:
             self.logger.exception(f"Failed to apply state to {dev.name}")
 
+    # ESPHome ClimateMode enum (protobuf int) -> Indigo HvacMode
+    # See aioesphomeapi.model.ClimateMode for the ESPHome int values.
+    # Indigo HvacMode ints: 0=Off, 1=Heat, 2=Cool, 3=HeatCool (Auto).
+    _CLIMATE_MODE_ESPHOME_TO_INDIGO = {
+        0: 0,    # OFF        -> Off
+        1: 3,    # HEAT_COOL  -> HeatCool
+        2: 2,    # COOL       -> Cool
+        3: 1,    # HEAT       -> Heat
+        4: 0,    # FAN_ONLY   -> Off (Indigo has no native FanOnly mode)
+        5: 0,    # DRY        -> Off (no native Indigo mode)
+        6: 3,    # AUTO       -> HeatCool
+    }
+
+    _CLIMATE_MODE_INDIGO_TO_ESPHOME = {
+        0: 0,    # Off       -> ESPHome OFF
+        1: 3,    # Heat      -> ESPHome HEAT
+        2: 2,    # Cool      -> ESPHome COOL
+        3: 1,    # HeatCool  -> ESPHome HEAT_COOL
+    }
+
     def _apply_state_to_device(self, dev, state):
         """Translate an ESPHome state object into Indigo state writes."""
         from aioesphomeapi import (
             SwitchState, SensorState, BinarySensorState, LightState,
-            TextSensorState, FanState, CoverState,
+            TextSensorState, FanState, CoverState, ClimateState,
+            LockEntityState, NumberState, SelectState,
         )
         if isinstance(state, SwitchState):
             dev.updateStateOnServer("onOffState", bool(state.state))
@@ -511,6 +565,90 @@ class Plugin(indigo.PluginBase):
                 dev.updateStateOnServer("direction",
                     "reverse" if int(state.direction) == 1 else "forward")
 
+        elif isinstance(state, LockEntityState):
+            # LockState enum: 0=NONE, 1=LOCKED, 2=UNLOCKED, 3=JAMMED,
+            # 4=LOCKING, 5=UNLOCKING, 6=OPENING, 7=OPEN
+            try:
+                lock_int = int(state.state) if state.state is not None else 0
+            except (TypeError, ValueError):
+                lock_int = 0
+            label_map = {0:"unknown", 1:"locked", 2:"unlocked", 3:"jammed",
+                         4:"locking", 5:"unlocking", 6:"opening", 7:"open"}
+            label = label_map.get(lock_int, "unknown")
+            # onOffState mirrors LOCKED (treat in-transit states as still effectively locked)
+            on = lock_int in (1, 4, 5)   # LOCKED, LOCKING, UNLOCKING
+            dev.updateStatesOnServer([
+                {"key": "onOffState", "value": on},
+                {"key": "lockState",  "value": label},
+            ])
+
+        elif isinstance(state, NumberState):
+            if getattr(state, "missing_state", False):
+                return
+            try:
+                dev.updateStateOnServer("value", float(state.state))
+            except (TypeError, ValueError):
+                pass
+
+        elif isinstance(state, SelectState):
+            if getattr(state, "missing_state", False):
+                return
+            dev.updateStateOnServer("selected", str(state.state))
+
+        elif isinstance(state, ClimateState):
+            # Convert ESPHome mode int to Indigo HvacMode int
+            esp_mode = int(getattr(state, "mode", 0) or 0)
+            indigo_mode = self._CLIMATE_MODE_ESPHOME_TO_INDIGO.get(esp_mode, 0)
+
+            updates = [{"key": "hvacOperationMode", "value": indigo_mode}]
+
+            # Current temperature (single sensor: temperatureInput1)
+            cur = getattr(state, "current_temperature", None)
+            if cur is not None:
+                updates.append({"key": "temperatureInput1", "value": float(cur),
+                                "uiValue": f"{float(cur):.1f}"})
+
+            # Setpoints. Two-point devices use target_temperature_low/high.
+            # Single-point devices put their target in target_temperature.
+            if dev.pluginProps.get("twoPoint", False):
+                lo = getattr(state, "target_temperature_low", None)
+                hi = getattr(state, "target_temperature_high", None)
+                if lo is not None:
+                    updates.append({"key": "setpointHeat", "value": float(lo)})
+                if hi is not None:
+                    updates.append({"key": "setpointCool", "value": float(hi)})
+            else:
+                tgt = getattr(state, "target_temperature", None)
+                if tgt is not None:
+                    # Map single-point setpoint to whichever side the mode is on
+                    if indigo_mode == 1:    # Heat
+                        updates.append({"key": "setpointHeat", "value": float(tgt)})
+                    elif indigo_mode == 2:  # Cool
+                        updates.append({"key": "setpointCool", "value": float(tgt)})
+                    else:
+                        # Auto / Off - report on both
+                        updates.append({"key": "setpointHeat", "value": float(tgt)})
+                        updates.append({"key": "setpointCool", "value": float(tgt)})
+
+            # Current HVAC action (heating / cooling / idle)
+            action_raw = getattr(state, "action", None)
+            if action_raw is not None:
+                action_name = str(action_raw).split(".")[-1].lower()
+                updates.append({"key": "action", "value": action_name})
+
+            # Preset
+            preset_raw = getattr(state, "preset", None)
+            if preset_raw is not None and not isinstance(preset_raw, int):
+                preset_name = str(preset_raw).split(".")[-1].lower()
+                updates.append({"key": "preset", "value": preset_name})
+            elif hasattr(state, "custom_preset") and state.custom_preset:
+                updates.append({"key": "preset", "value": str(state.custom_preset)})
+
+            try:
+                dev.updateStatesOnServer(updates)
+            except Exception as exc:
+                self.logger.debug(f"Climate state write failed on {dev.name}: {exc}")
+
         elif isinstance(state, CoverState):
             # ESPHome cover: position (0.0-1.0), current_operation (0/1/2),
             # tilt (0.0-1.0). Map position to brightness 0-100; 0=closed,
@@ -537,6 +675,19 @@ class Plugin(indigo.PluginBase):
         new_folder = indigo.devices.folder.create(name)
         self.logger.info(f"Created device folder: '{name}'")
         return new_folder.id
+
+    def _update_node_status(self, mac, connected, status):
+        """Update the esphomeNode device's connection-status states."""
+        node = self._find_node_device(mac)
+        if not node:
+            return
+        try:
+            node.updateStatesOnServer([
+                {"key": "connected", "value": bool(connected)},
+                {"key": "status",    "value": str(status)},
+            ])
+        except Exception as exc:
+            self.logger.debug(f"node status update failed for {mac}: {exc}")
 
     def _find_node_device(self, mac):
         if mac in self.nodes_by_mac:
@@ -619,7 +770,7 @@ class Plugin(indigo.PluginBase):
         """Auto-create one Indigo device per ESPHome entity we know how to map."""
         from aioesphomeapi import (
             SwitchInfo, SensorInfo, BinarySensorInfo, LightInfo, TextSensorInfo,
-            FanInfo, CoverInfo,
+            FanInfo, CoverInfo, ClimateInfo, LockInfo, NumberInfo, SelectInfo,
         )
         folder_id = self._ensure_device_folder(DEVICE_FOLDER_NAME)
         for e in entities:
@@ -657,6 +808,36 @@ class Plugin(indigo.PluginBase):
                 extra_props["supportsPosition"]     = bool(getattr(e, "supports_position", True))
                 extra_props["supportsTilt"]         = bool(getattr(e, "supports_tilt", False))
                 extra_props["deviceClass"]          = getattr(e, "device_class", "") or ""
+            elif isinstance(e, LockInfo):
+                type_id = "esphomeLock"
+                extra_props["supportsOpen"] = bool(getattr(e, "supports_open", False))
+                extra_props["requiresCode"] = bool(getattr(e, "requires_code", False))
+            elif isinstance(e, NumberInfo):
+                type_id = "esphomeNumber"
+                extra_props["minValue"] = str(getattr(e, "min_value", 0) or 0)
+                extra_props["maxValue"] = str(getattr(e, "max_value", 0) or 0)
+                extra_props["step"]     = str(getattr(e, "step",      1) or 1)
+                extra_props["unit"]     = getattr(e, "unit_of_measurement", "") or ""
+            elif isinstance(e, SelectInfo):
+                type_id = "esphomeSelect"
+                opts = list(getattr(e, "options", []) or [])
+                extra_props["options"] = ", ".join(str(o) for o in opts)
+            elif isinstance(e, ClimateInfo):
+                type_id = "esphomeClimate"
+                modes = list(getattr(e, "supported_modes", []) or [])
+                extra_props["visualMin"]            = str(getattr(e, "visual_min_temperature", 0) or 0)
+                extra_props["visualMax"]            = str(getattr(e, "visual_max_temperature", 0) or 0)
+                extra_props["supportedModes"]       = ", ".join(str(m).split(".")[-1] for m in modes)
+                extra_props["twoPoint"]             = bool(getattr(e, "supports_two_point_target_temperature", False))
+                extra_props["NumTemperatureInputs"] = "1" if getattr(e, "supports_current_temperature", False) else "0"
+                # Heat/Cool setpoint flags driven by which modes the device exposes
+                mode_names = [str(m).upper() for m in modes]
+                has_heat = any("HEAT" in n for n in mode_names)
+                has_cool = any("COOL" in n for n in mode_names)
+                extra_props["SupportsHeatSetpoint"] = has_heat or extra_props["twoPoint"]
+                extra_props["SupportsCoolSetpoint"] = has_cool or extra_props["twoPoint"]
+                extra_props["SupportsHvacOperationMode"] = True
+                extra_props["SupportsHvacFanMode"]  = bool(getattr(e, "supported_fan_modes", []) or [])
             else:
                 continue  # unknown / unsupported entity type for v0.1
 
@@ -836,6 +1017,34 @@ class Plugin(indigo.PluginBase):
             self.async_loop.call_soon_threadsafe(_do_fan)
             return
 
+        if dev.deviceTypeId == "esphomeLock":
+            from aioesphomeapi import LockCommand
+            if da == indigo.kDeviceAction.TurnOn:
+                cmd = LockCommand.LOCK
+            elif da == indigo.kDeviceAction.TurnOff:
+                cmd = LockCommand.UNLOCK
+            elif da == indigo.kDeviceAction.Toggle:
+                cmd = LockCommand.UNLOCK if bool(dev.onState) else LockCommand.LOCK
+            else:
+                self.logger.debug(f"Unhandled lock action {da} on {dev.name}")
+                return
+
+            def _do_lock():
+                try:
+                    client.lock_command(key=key, command=cmd)
+                except Exception:
+                    self.logger.exception(f"lock_command failed for {dev.name}")
+
+            self.async_loop.call_soon_threadsafe(_do_lock)
+            return
+
+        if dev.deviceTypeId == "esphomeClimate":
+            # actionControlDevice doesn't carry thermostat-specific actions;
+            # Indigo routes those to actionControlThermostat. Nothing to do
+            # here - leave for that callback.
+            self.logger.debug(f"Climate device on actionControlDevice path: {da}")
+            return
+
         if dev.deviceTypeId == "esphomeCover":
             # Indigo's brightness 0-100 maps to position 0.0-1.0 (0=closed)
             cover_kwargs = {"key": key}
@@ -867,6 +1076,201 @@ class Plugin(indigo.PluginBase):
             return
 
         self.logger.debug(f"actionControlDevice: no handler for type {dev.deviceTypeId} on {dev.name}")
+
+    # --------------------------------------------------------
+    # Custom actions (Actions.xml)
+    # --------------------------------------------------------
+
+    def _client_for(self, dev):
+        """Common helper: resolve the aioesphomeapi client + entity key for
+        a device-anchored custom action. Returns (client, key) or (None, 0)."""
+        mac = dev.pluginProps.get("nodeMac", "") or dev.address
+        try:
+            key = int(dev.pluginProps.get("entityKey", "0") or 0)
+        except (TypeError, ValueError):
+            key = 0
+        conn = self.connections.get(mac.split("-")[0], {})
+        client = conn.get("client")
+        if not client:
+            self.logger.warning(f"{dev.name}: no active connection")
+            return None, 0
+        return client, key
+
+    def actionSetNumberValue(self, action, dev):
+        if dev.deviceTypeId != "esphomeNumber":
+            return
+        client, key = self._client_for(dev)
+        if not client:
+            return
+        try:
+            val = float(action.props.get("value", "0"))
+        except (TypeError, ValueError):
+            self.logger.warning(f"{dev.name}: bad number value")
+            return
+
+        def _do():
+            try:
+                client.number_command(key=key, state=val)
+            except Exception:
+                self.logger.exception(f"number_command failed for {dev.name}")
+
+        self.async_loop.call_soon_threadsafe(_do)
+
+    def actionSetSelectOption(self, action, dev):
+        if dev.deviceTypeId != "esphomeSelect":
+            return
+        client, key = self._client_for(dev)
+        if not client:
+            return
+        opt = action.props.get("option", "").strip()
+        if not opt:
+            self.logger.warning(f"{dev.name}: select option not specified")
+            return
+        valid = [o.strip() for o in (dev.pluginProps.get("options") or "").split(",")]
+        if valid and opt not in valid:
+            self.logger.warning(f"{dev.name}: '{opt}' not in available options ({', '.join(valid)})")
+            return
+
+        def _do():
+            try:
+                client.select_command(key=key, state=opt)
+            except Exception:
+                self.logger.exception(f"select_command failed for {dev.name}")
+
+        self.async_loop.call_soon_threadsafe(_do)
+
+    def actionLockOpen(self, action, dev):
+        """OPEN command (latch-release) for locks that support it."""
+        if dev.deviceTypeId != "esphomeLock":
+            return
+        from aioesphomeapi import LockCommand
+        client, key = self._client_for(dev)
+        if not client:
+            return
+
+        def _do():
+            try:
+                client.lock_command(key=key, command=LockCommand.OPEN)
+            except Exception:
+                self.logger.exception(f"lock_command OPEN failed for {dev.name}")
+
+        self.async_loop.call_soon_threadsafe(_do)
+
+    def actionPressButton(self, action, dev):
+        """Generic 'press an ESPHome Button entity' action, anchored on the
+        esphomeNode device. Caller supplies the button's entity key (numeric)."""
+        if dev.deviceTypeId != "esphomeNode":
+            return
+        mac = dev.address
+        try:
+            key = int(action.props.get("entityKey", "0") or 0)
+        except (TypeError, ValueError):
+            self.logger.warning(f"{dev.name}: bad entity key for pressButton")
+            return
+        if not key:
+            self.logger.warning(f"{dev.name}: entity key required for pressButton")
+            return
+        conn = self.connections.get(mac, {})
+        client = conn.get("client")
+        if not client:
+            self.logger.warning(f"{dev.name}: no active connection")
+            return
+
+        def _do():
+            try:
+                client.button_command(key=key)
+            except Exception:
+                self.logger.exception(f"button_command failed for {dev.name}")
+
+        self.async_loop.call_soon_threadsafe(_do)
+
+    # --------------------------------------------------------
+    # Thermostat actions
+    # --------------------------------------------------------
+
+    def actionControlThermostat(self, action, dev):
+        """Indigo thermostat actions for esphomeClimate.
+
+        Routes Indigo's kThermostatAction.* to ESPHome's climate_command(...).
+        """
+        if dev.deviceTypeId != "esphomeClimate":
+            return
+
+        mac = dev.pluginProps.get("nodeMac", "")
+        try:
+            key = int(dev.pluginProps.get("entityKey", "0"))
+        except (TypeError, ValueError):
+            return
+        conn = self.connections.get(mac, {})
+        client = conn.get("client")
+        if not client:
+            self.logger.warning(f"{dev.name}: no active connection to {mac}")
+            return
+
+        ta = action.thermostatAction
+        kwargs = {"key": key}
+
+        if ta == indigo.kThermostatAction.SetHvacMode:
+            indigo_mode = int(action.actionMode)
+            esp_mode = self._CLIMATE_MODE_INDIGO_TO_ESPHOME.get(indigo_mode)
+            if esp_mode is None:
+                self.logger.warning(f"{dev.name}: unsupported HVAC mode {indigo_mode}")
+                return
+            kwargs["mode"] = esp_mode
+
+        elif ta == indigo.kThermostatAction.SetHeatSetpoint:
+            sp = float(action.actionValue)
+            if dev.pluginProps.get("twoPoint", False):
+                kwargs["target_temperature_low"] = sp
+            else:
+                kwargs["target_temperature"] = sp
+
+        elif ta == indigo.kThermostatAction.SetCoolSetpoint:
+            sp = float(action.actionValue)
+            if dev.pluginProps.get("twoPoint", False):
+                kwargs["target_temperature_high"] = sp
+            else:
+                kwargs["target_temperature"] = sp
+
+        elif ta in (indigo.kThermostatAction.IncreaseHeatSetpoint, indigo.kThermostatAction.DecreaseHeatSetpoint):
+            delta = float(action.actionValue)
+            if ta == indigo.kThermostatAction.DecreaseHeatSetpoint:
+                delta = -delta
+            current = dev.heatSetpoint or 20.0
+            new_sp = current + delta
+            if dev.pluginProps.get("twoPoint", False):
+                kwargs["target_temperature_low"] = new_sp
+            else:
+                kwargs["target_temperature"] = new_sp
+
+        elif ta in (indigo.kThermostatAction.IncreaseCoolSetpoint, indigo.kThermostatAction.DecreaseCoolSetpoint):
+            delta = float(action.actionValue)
+            if ta == indigo.kThermostatAction.DecreaseCoolSetpoint:
+                delta = -delta
+            current = dev.coolSetpoint or 24.0
+            new_sp = current + delta
+            if dev.pluginProps.get("twoPoint", False):
+                kwargs["target_temperature_high"] = new_sp
+            else:
+                kwargs["target_temperature"] = new_sp
+
+        elif ta == indigo.kThermostatAction.RequestStatusAll:
+            # No explicit method; rely on subscribe_states which already
+            # streams updates as they happen. Just log.
+            self.logger.debug(f"{dev.name}: RequestStatusAll (passive)")
+            return
+
+        else:
+            self.logger.debug(f"Unhandled thermostat action {ta} on {dev.name}")
+            return
+
+        def _do_climate():
+            try:
+                client.climate_command(**kwargs)
+            except Exception:
+                self.logger.exception(f"climate_command failed for {dev.name}")
+
+        self.async_loop.call_soon_threadsafe(_do_climate)
 
     # --------------------------------------------------------
     # Trigger lifecycle

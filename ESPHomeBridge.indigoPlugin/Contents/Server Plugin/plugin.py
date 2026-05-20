@@ -6,7 +6,7 @@
 #              maps each ESPHome entity to a native Indigo device.
 # Author:      CliveS & Claude Opus 4.7
 # Date:        20-05-2026
-# Version:     0.4.4
+# Version:     0.5.0
 
 try:
     import indigo
@@ -40,7 +40,7 @@ except ImportError:
 # ============================================================
 
 PLUGIN_ID      = "com.clives.indigoplugin.esphomebridge"
-PLUGIN_VERSION = "0.4.4"
+PLUGIN_VERSION = "0.5.0"
 
 DEVICE_FOLDER_NAME = "ESPHome"
 
@@ -1969,6 +1969,145 @@ class Plugin(indigo.PluginBase):
                     f"  key={key:>8}  {type(e).__name__:<20} "
                     f"name={e.name!r:<30} object_id={getattr(e,'object_id','')!r}"
                 )
+
+    # --- OTA firmware upload (menu) ---
+
+    def getOurDevicesForMenu(self, filter, valuesDict, typeId, targetId):
+        """List callback for the OTA-upload menu's Target Device dropdown.
+        Includes BOTH adopted Indigo devices AND mDNS-discovered nodes
+        that haven't been adopted yet (e.g. encryption-locked nodes that
+        still need the new firmware). The picker value is the IP so the
+        upload only needs that, not a device lookup."""
+        items = []
+        seen_ips = set()
+        # Indigo devices first
+        for dev in indigo.devices.iter(self.pluginId):
+            if dev.deviceTypeId not in self._OUR_DEVICE_TYPES:
+                continue
+            ip = dev.pluginProps.get("ip", "")
+            if not ip:
+                continue
+            label = f"{dev.name} ({ip})"
+            items.append((ip, label))
+            seen_ips.add(ip)
+        # Then any mDNS-discovered nodes not yet adopted (e.g. those
+        # locked out by an unknown encryption key)
+        for mac, d in self.discovered.items():
+            ip = d.get("ip", "")
+            if not ip or ip in seen_ips:
+                continue
+            host = d.get("hostname", mac)
+            items.append((ip, f"{host} ({ip}) — discovered, not adopted"))
+            seen_ips.add(ip)
+        items.sort(key=lambda x: x[1].lower())
+        return items
+
+    def menuOtaUpload(self, valuesDict, typeId):
+        """Submit handler for the OTA-upload menu. Validates the firmware
+        path + IP, then kicks off the actual upload in a background
+        thread (the upload takes ~5-30s depending on size and won't fit
+        inside Indigo's ~30s UI-callback budget).
+        """
+        errors = indigo.Dict()
+        ip   = (valuesDict.get("targetDeviceId") or "").strip()
+        path = (valuesDict.get("firmwarePath") or "").strip()
+        # Strip quotes that Finder's Copy-as-Pathname adds
+        path = path.strip('"').strip("'")
+        if not ip:
+            errors["targetDeviceId"] = "Pick a target device."
+        if not path:
+            errors["firmwarePath"] = "Provide a path to the firmware .bin file."
+        elif not os.path.isfile(path):
+            errors["firmwarePath"] = f"File not found: {path}"
+        elif os.path.getsize(path) < 100_000:
+            errors["firmwarePath"] = (
+                f"File looks too small ({os.path.getsize(path)} bytes). "
+                "ESPHome firmware .bin files are typically 600 KB-1.5 MB."
+            )
+        if errors:
+            return (False, valuesDict, errors)
+        # Find a friendly name + dev_id for logging (best-effort)
+        dev_name = ip
+        dev_id   = None
+        for dev in indigo.devices.iter(self.pluginId):
+            if dev.pluginProps.get("ip") == ip:
+                dev_name = dev.name
+                dev_id   = dev.id
+                break
+        # Fire and forget — worker reports progress + outcome to the log
+        threading.Thread(
+            target=self._ota_upload_worker,
+            args=(dev_id, dev_name, ip, path),
+            name=f"OTA-{ip}",
+            daemon=True,
+        ).start()
+        self.logger.info(
+            f"OTA upload started: {dev_name} <- {os.path.basename(path)} "
+            f"({os.path.getsize(path):,} bytes). Watch this log for progress."
+        )
+        return (True, valuesDict)
+
+    def _ota_upload_worker(self, dev_id, dev_name, ip, path):
+        """Background worker: POST the .bin to the device's /update endpoint.
+
+        The ESPHome web_server v3 OTA endpoint is multipart/form-data:
+          - file:        the firmware bytes (field name 'update' or 'file')
+          - Response:    200 + 'OK' on success; on success the device
+                         reboots itself ~1-2s after the response.
+
+        We disconnect the API client before uploading so the ESP doesn't
+        kill our connection mid-flight — but we let it reconnect via the
+        existing reconnect loop after the device comes back up.
+        """
+        import requests
+        url = f"http://{ip}/update"
+        size = os.path.getsize(path)
+        self.logger.info(f"OTA {dev_name}: POST {url} ({size:,} bytes)...")
+        # Best-effort: stop the API client so it doesn't fight the upload.
+        # The reconnect loop will pick it back up automatically once the
+        # device finishes flashing and reboots.
+        mac = ""
+        if dev_id is not None:
+            for m, d in self.nodes_by_mac.items():
+                if d.id == dev_id:
+                    mac = m
+                    break
+        if mac and mac in self.connections:
+            client = self.connections[mac].get("client")
+            if client:
+                try:
+                    self.async_loop.call_soon_threadsafe(
+                        lambda: asyncio.create_task(client.disconnect())
+                    )
+                    time.sleep(1)
+                except Exception as exc:
+                    self.logger.debug(f"OTA {dev_name}: client disconnect raised: {exc}")
+        # Upload — the ESPHome /update endpoint accepts the file under a
+        # form field. Different ESPHome web_server versions have used
+        # 'update' and 'file'; we just try the modern one.
+        t0 = time.time()
+        try:
+            with open(path, "rb") as f:
+                resp = requests.post(
+                    url,
+                    files={"file": (os.path.basename(path), f, "application/octet-stream")},
+                    timeout=180,
+                )
+        except requests.exceptions.RequestException as exc:
+            self.logger.error(f"OTA {dev_name}: upload failed: {exc}")
+            return
+        dt = time.time() - t0
+        if 200 <= resp.status_code < 300:
+            self.logger.info(
+                f"OTA {dev_name}: upload complete in {dt:.1f}s "
+                f"(HTTP {resp.status_code}). Device is rebooting; "
+                "plugin will reconnect on next mDNS announcement."
+            )
+        else:
+            self.logger.error(
+                f"OTA {dev_name}: device returned HTTP {resp.status_code}: "
+                f"{resp.text[:200]}"
+            )
 
     def showPluginInfo(self, valuesDict=None, typeId=None):
         if log_startup_banner:

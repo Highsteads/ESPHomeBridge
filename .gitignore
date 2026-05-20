@@ -10,3 +10,8 @@ Contents/Packages/
 **/Contents/Packages/
 *.zip
 CLAUDE.md
+
+# Per-rig YAMLs that have inline WiFi credentials baked in (local-only).
+# The captive-portal variants in this folder are safe to commit; only
+# the named-credentials variants need to stay off GitHub.
+test-fixtures/esp-dining-room-rgb-rig.yaml

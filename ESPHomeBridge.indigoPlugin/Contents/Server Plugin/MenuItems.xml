@@ -16,6 +16,26 @@
         <CallbackMethod>menuDumpEntities</CallbackMethod>
     </MenuItem>
 
+    <MenuItem id="sep0" isSeparator="true"/>
+
+    <MenuItem id="otaUpload">
+        <Name>Upload Firmware (OTA)...</Name>
+        <CallbackMethod>menuOtaUpload</CallbackMethod>
+        <ConfigUI>
+            <Field id="targetDeviceId" type="menu">
+                <Label>Target Device:</Label>
+                <List class="self" method="getOurDevicesForMenu" filter=""/>
+            </Field>
+            <Field id="firmwarePath" type="textfield" defaultValue="">
+                <Label>Firmware .bin path:</Label>
+                <Description>Full path to firmware.ota.bin (or firmware.bin) produced by esphome compile.</Description>
+            </Field>
+            <Field id="info" type="label">
+                <Label>Uploads the file to the device's web_server /update endpoint over HTTP. Same mechanism the in-browser OTA form uses. Device reboots automatically after a successful upload (~10-15s).</Label>
+            </Field>
+        </ConfigUI>
+    </MenuItem>
+
     <MenuItem id="sep1" isSeparator="true"/>
 
     <MenuItem id="showPluginInfo">

@@ -1,24 +1,35 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!-- v0.4.0: actions now target ANY ESPHomeBridge node device (since there's    -->
+<!-- exactly one Indigo device per node). A dropdown in each action's ConfigUI -->
+<!-- picks which entity on that node to target (by state_id in entityKeyMap).  -->
 <Actions>
 
-    <Action id="setNumberValue" deviceFilter="self.esphomeNumber">
-        <Name>Set Number Value</Name>
+    <Action id="setNumberValue" deviceFilter="self">
+        <Name>Set Number Entity Value</Name>
         <CallbackMethod>actionSetNumberValue</CallbackMethod>
         <ConfigUI>
+            <Field id="entityStateId" type="menu">
+                <Label>Number Entity:</Label>
+                <List class="self" method="getNumberEntities" filter=""/>
+            </Field>
             <Field id="value" type="textfield" defaultValue="0">
                 <Label>Value:</Label>
-                <Description>New numeric value (within the entity's min/max range as shown in Configure dialog)</Description>
+                <Description>New numeric value (within the entity's min/max range)</Description>
             </Field>
         </ConfigUI>
     </Action>
 
-    <Action id="setSelectOption" deviceFilter="self.esphomeSelect">
-        <Name>Set Select Option</Name>
+    <Action id="setSelectOption" deviceFilter="self">
+        <Name>Set Select Entity Option</Name>
         <CallbackMethod>actionSetSelectOption</CallbackMethod>
         <ConfigUI>
+            <Field id="entityStateId" type="menu">
+                <Label>Select Entity:</Label>
+                <List class="self" method="getSelectEntities" filter=""/>
+            </Field>
             <Field id="option" type="textfield" defaultValue="">
                 <Label>Option:</Label>
-                <Description>Must exactly match one of the options shown in the Configure dialog</Description>
+                <Description>Must exactly match one of the entity's options (case-sensitive)</Description>
             </Field>
         </ConfigUI>
     </Action>
@@ -33,13 +44,13 @@
         </ConfigUI>
     </Action>
 
-    <Action id="pressButton" deviceFilter="self.esphomeNode">
+    <Action id="pressButton" deviceFilter="self">
         <Name>Press ESPHome Button</Name>
         <CallbackMethod>actionPressButton</CallbackMethod>
         <ConfigUI>
-            <Field id="entityKey" type="textfield" defaultValue="">
-                <Label>Button Entity Key:</Label>
-                <Description>The numeric key of the button entity (find via Plugins -> ESPHome Bridge -> Dump All Entities to Log). Buttons are stateless; this triggers the button's on_press action on the device.</Description>
+            <Field id="entityStateId" type="menu">
+                <Label>Button Entity:</Label>
+                <List class="self" method="getButtonEntities" filter=""/>
             </Field>
         </ConfigUI>
     </Action>

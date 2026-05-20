@@ -1,19 +1,32 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- ESPHome Bridge Plugin - Devices.xml                                              -->
-<!-- One esphomeNode device per discovered ESPHome board (diagnostics + online).       -->
-<!-- Plus one device per controllable/important entity (switch, light, fan, cover,    -->
-<!-- climate, lock). Pure sensors/binary_sensors land as states on the node device.   -->
+<!-- v0.4.0 architecture: ONE Indigo device per ESPHome node (Tasmota-style).         -->
+<!-- The device type matches the node's primary control entity (Lock > Climate >      -->
+<!-- Switch > Light > Fan > Cover > else esphomeNode). All other entities become      -->
+<!-- custom states on that single device, declared dynamically via getDeviceStateList -->
+<!-- from the entityKeyMap JSON stored in pluginProps.                                 -->
 <Devices>
 
-    <!-- =============================================================
-         esphomeNode - the ESPHome board itself (diagnostic device)
-         ============================================================= -->
+    <!-- ============================================================
+         Shared ConfigUI snippet (copy-pasted into each Device since
+         Indigo's XML has no include mechanism):
+           address          MAC (12-char uppercase, no separators)
+           hostname         ESPHome node hostname
+           ip / port        Native API endpoint
+           encryptionKey    Base64 noise_psk (blank for plaintext)
+           boardModel       e.g. esp32dev, esp8285
+           esphomeVersion   e.g. 2026.4.5
+           entityKeyMap     hidden JSON {state_id: {key, kind, name, ...}}
+         ============================================================ -->
+
+    <!-- ============================================================
+         esphomeNode - info-only node (no primary control entity)
+         ============================================================ -->
     <Device type="custom" id="esphomeNode">
-        <Name>ESPHome Node</Name>
+        <Name>ESPHome Node (info-only)</Name>
         <ConfigUI>
             <Field id="address" type="textfield" defaultValue="">
                 <Label>MAC Address:</Label>
-                <Description>12-char uppercase MAC, no separators</Description>
             </Field>
             <Field id="hostname" type="textfield" defaultValue="">
                 <Label>Hostname:</Label>
@@ -34,7 +47,7 @@
             <Field id="esphomeVersion" type="textfield" readonly="true" defaultValue="">
                 <Label>ESPHome Version:</Label>
             </Field>
-            <Field id="seenDynamicKeys" type="textfield" hidden="true" defaultValue=""/>
+            <Field id="entityKeyMap" type="textfield" hidden="true" defaultValue=""/>
         </ConfigUI>
         <States>
             <State id="connected">
@@ -47,11 +60,6 @@
                 <TriggerLabel>Status Changed</TriggerLabel>
                 <ControlPageLabel>Status</ControlPageLabel>
             </State>
-            <State id="rssi">
-                <ValueType>Integer</ValueType>
-                <TriggerLabel>WiFi RSSI Changed</TriggerLabel>
-                <ControlPageLabel>WiFi RSSI</ControlPageLabel>
-            </State>
             <State id="lastSeen">
                 <ValueType>String</ValueType>
                 <TriggerLabel>Last Seen Changed</TriggerLabel>
@@ -61,146 +69,34 @@
         <UiDisplayStateId>status</UiDisplayStateId>
     </Device>
 
-    <!-- =============================================================
-         esphomeSwitch - ESPHome switch entity (relay class)
-         ============================================================= -->
+    <!-- ============================================================
+         esphomeSwitch - relay-class node (primary entity = Switch)
+         ============================================================ -->
     <Device type="relay" id="esphomeSwitch">
-        <Name>ESPHome Switch</Name>
+        <Name>ESPHome Switch Node</Name>
         <ConfigUI>
-            <Field id="address" type="textfield" defaultValue="">
-                <Label>Compound Address (mac_entity):</Label>
+            <Field id="address" type="textfield" defaultValue=""><Label>MAC Address:</Label></Field>
+            <Field id="hostname" type="textfield" defaultValue=""><Label>Hostname:</Label></Field>
+            <Field id="ip" type="textfield" defaultValue=""><Label>IP Address:</Label></Field>
+            <Field id="port" type="textfield" defaultValue="6053"><Label>API Port:</Label></Field>
+            <Field id="encryptionKey" type="textfield" defaultValue="">
+                <Label>API Encryption Key (Base64):</Label>
+                <Description>From the device's YAML api: encryption: key: line. Leave blank for unencrypted API.</Description>
             </Field>
-            <Field id="nodeMac" type="textfield" defaultValue="">
-                <Label>Node MAC:</Label>
-            </Field>
-            <Field id="entityKey" type="textfield" defaultValue="">
-                <Label>Entity Key:</Label>
-            </Field>
-            <Field id="entityName" type="textfield" readonly="true" defaultValue="">
-                <Label>Entity Name:</Label>
-            </Field>
+            <Field id="boardModel" type="textfield" readonly="true" defaultValue=""><Label>Board:</Label></Field>
+            <Field id="esphomeVersion" type="textfield" readonly="true" defaultValue=""><Label>ESPHome Version:</Label></Field>
+            <Field id="entityKeyMap" type="textfield" hidden="true" defaultValue=""/>
         </ConfigUI>
         <States>
-            <State id="lastSeen">
-                <ValueType>String</ValueType>
-                <TriggerLabel>Last Seen Changed</TriggerLabel>
-                <ControlPageLabel>Last Seen</ControlPageLabel>
-            </State>
-        </States>
-    </Device>
-
-    <!-- =============================================================
-         esphomeSensor - numeric or text sensor entity
-         ============================================================= -->
-    <Device type="sensor" id="esphomeSensor">
-        <Name>ESPHome Sensor</Name>
-        <ConfigUI>
-            <Field id="address" type="textfield" defaultValue="">
-                <Label>Compound Address (mac_entity):</Label>
-            </Field>
-            <Field id="nodeMac" type="textfield" defaultValue="">
-                <Label>Node MAC:</Label>
-            </Field>
-            <Field id="entityKey" type="textfield" defaultValue="">
-                <Label>Entity Key:</Label>
-            </Field>
-            <Field id="entityName" type="textfield" readonly="true" defaultValue="">
-                <Label>Entity Name:</Label>
-            </Field>
-            <Field id="unit" type="textfield" readonly="true" defaultValue="">
-                <Label>Unit:</Label>
-            </Field>
-        </ConfigUI>
-        <States>
-            <State id="value">
-                <ValueType>Number</ValueType>
-                <TriggerLabel>Value Changed</TriggerLabel>
-                <ControlPageLabel>Value</ControlPageLabel>
-            </State>
-            <State id="valueText">
-                <ValueType>String</ValueType>
-                <TriggerLabel>Text Value Changed</TriggerLabel>
-                <ControlPageLabel>Text Value</ControlPageLabel>
-            </State>
-            <State id="lastSeen">
-                <ValueType>String</ValueType>
-                <TriggerLabel>Last Seen Changed</TriggerLabel>
-                <ControlPageLabel>Last Seen</ControlPageLabel>
-            </State>
-        </States>
-        <UiDisplayStateId>value</UiDisplayStateId>
-    </Device>
-
-    <!-- =============================================================
-         esphomeBinarySensor - on/off sensor (motion, door, etc.)
-         ============================================================= -->
-    <Device type="sensor" id="esphomeBinarySensor">
-        <Name>ESPHome Binary Sensor</Name>
-        <ConfigUI>
-            <Field id="address" type="textfield" defaultValue="">
-                <Label>Compound Address (mac_entity):</Label>
-            </Field>
-            <Field id="nodeMac" type="textfield" defaultValue="">
-                <Label>Node MAC:</Label>
-            </Field>
-            <Field id="entityKey" type="textfield" defaultValue="">
-                <Label>Entity Key:</Label>
-            </Field>
-            <Field id="entityName" type="textfield" readonly="true" defaultValue="">
-                <Label>Entity Name:</Label>
-            </Field>
-            <Field id="deviceClass" type="textfield" readonly="true" defaultValue="">
-                <Label>Device Class:</Label>
-                <Description>e.g. motion, door, window, garage_door</Description>
-            </Field>
-            <Field id="SupportsOnState" type="checkbox" hidden="true" defaultValue="true"/>
-        </ConfigUI>
-        <States>
-            <State id="lastSeen">
-                <ValueType>String</ValueType>
-                <TriggerLabel>Last Seen Changed</TriggerLabel>
-                <ControlPageLabel>Last Seen</ControlPageLabel>
-            </State>
-        </States>
-    </Device>
-
-    <!-- =============================================================
-         esphomeFan - variable-speed fan
-         Modelled as a dimmer where brightness 0-100 = fan speed.
-         ESPHome scales internally to its supports_speed_levels count.
-         ============================================================= -->
-    <Device type="dimmer" id="esphomeFan">
-        <Name>ESPHome Fan</Name>
-        <ConfigUI>
-            <Field id="address" type="textfield" defaultValue="">
-                <Label>Compound Address (mac_entity):</Label>
-            </Field>
-            <Field id="nodeMac" type="textfield" defaultValue="">
-                <Label>Node MAC:</Label>
-            </Field>
-            <Field id="entityKey" type="textfield" defaultValue="">
-                <Label>Entity Key:</Label>
-            </Field>
-            <Field id="entityName" type="textfield" readonly="true" defaultValue="">
-                <Label>Entity Name:</Label>
-            </Field>
-            <Field id="speedLevels" type="textfield" readonly="true" defaultValue="">
-                <Label>Speed Levels:</Label>
-                <Description>Number of discrete speeds reported by the ESPHome fan.</Description>
-            </Field>
-            <Field id="supportsOscillation" type="checkbox" hidden="true" defaultValue="false"/>
-            <Field id="supportsDirection"   type="checkbox" hidden="true" defaultValue="false"/>
-        </ConfigUI>
-        <States>
-            <State id="oscillating">
+            <State id="connected">
                 <ValueType>Boolean</ValueType>
-                <TriggerLabel>Oscillating Changed</TriggerLabel>
-                <ControlPageLabel>Oscillating</ControlPageLabel>
+                <TriggerLabel>Connected Changed</TriggerLabel>
+                <ControlPageLabel>Connected</ControlPageLabel>
             </State>
-            <State id="direction">
+            <State id="status">
                 <ValueType>String</ValueType>
-                <TriggerLabel>Direction Changed</TriggerLabel>
-                <ControlPageLabel>Direction</ControlPageLabel>
+                <TriggerLabel>Status Changed</TriggerLabel>
+                <ControlPageLabel>Status</ControlPageLabel>
             </State>
             <State id="lastSeen">
                 <ValueType>String</ValueType>
@@ -210,244 +106,146 @@
         </States>
     </Device>
 
-    <!-- =============================================================
-         esphomeCover - blind / shutter / garage door
-         Modelled as a dimmer where brightness = position (0 closed, 100 open).
-         ============================================================= -->
+    <!-- ============================================================
+         esphomeLight - dimmer-class node (primary entity = Light)
+         ============================================================ -->
+    <Device type="dimmer" id="esphomeLight">
+        <Name>ESPHome Light Node</Name>
+        <ConfigUI>
+            <Field id="address" type="textfield" defaultValue=""><Label>MAC Address:</Label></Field>
+            <Field id="hostname" type="textfield" defaultValue=""><Label>Hostname:</Label></Field>
+            <Field id="ip" type="textfield" defaultValue=""><Label>IP Address:</Label></Field>
+            <Field id="port" type="textfield" defaultValue="6053"><Label>API Port:</Label></Field>
+            <Field id="encryptionKey" type="textfield" defaultValue="">
+                <Label>API Encryption Key (Base64):</Label>
+            </Field>
+            <Field id="boardModel" type="textfield" readonly="true" defaultValue=""><Label>Board:</Label></Field>
+            <Field id="esphomeVersion" type="textfield" readonly="true" defaultValue=""><Label>ESPHome Version:</Label></Field>
+            <Field id="SupportsColor" type="checkbox" hidden="true" defaultValue="false"/>
+            <Field id="SupportsRGB" type="checkbox" hidden="true" defaultValue="false"/>
+            <Field id="SupportsWhite" type="checkbox" hidden="true" defaultValue="false"/>
+            <Field id="SupportsWhiteTemperature" type="checkbox" hidden="true" defaultValue="false"/>
+            <Field id="entityKeyMap" type="textfield" hidden="true" defaultValue=""/>
+        </ConfigUI>
+        <States>
+            <State id="connected"><ValueType>Boolean</ValueType><TriggerLabel>Connected Changed</TriggerLabel><ControlPageLabel>Connected</ControlPageLabel></State>
+            <State id="status"><ValueType>String</ValueType><TriggerLabel>Status Changed</TriggerLabel><ControlPageLabel>Status</ControlPageLabel></State>
+            <State id="colorTemp"><ValueType>Integer</ValueType><TriggerLabel>Color Temp Changed</TriggerLabel><ControlPageLabel>Color Temp</ControlPageLabel></State>
+            <State id="lastSeen"><ValueType>String</ValueType><TriggerLabel>Last Seen Changed</TriggerLabel><ControlPageLabel>Last Seen</ControlPageLabel></State>
+        </States>
+    </Device>
+
+    <!-- ============================================================
+         esphomeFan - dimmer-class node (primary entity = Fan, speed)
+         ============================================================ -->
+    <Device type="dimmer" id="esphomeFan">
+        <Name>ESPHome Fan Node</Name>
+        <ConfigUI>
+            <Field id="address" type="textfield" defaultValue=""><Label>MAC Address:</Label></Field>
+            <Field id="hostname" type="textfield" defaultValue=""><Label>Hostname:</Label></Field>
+            <Field id="ip" type="textfield" defaultValue=""><Label>IP Address:</Label></Field>
+            <Field id="port" type="textfield" defaultValue="6053"><Label>API Port:</Label></Field>
+            <Field id="encryptionKey" type="textfield" defaultValue=""><Label>API Encryption Key (Base64):</Label></Field>
+            <Field id="boardModel" type="textfield" readonly="true" defaultValue=""><Label>Board:</Label></Field>
+            <Field id="esphomeVersion" type="textfield" readonly="true" defaultValue=""><Label>ESPHome Version:</Label></Field>
+            <Field id="speedLevels" type="textfield" readonly="true" defaultValue="0"><Label>Speed Levels:</Label></Field>
+            <Field id="supportsOscillation" type="checkbox" hidden="true" defaultValue="false"/>
+            <Field id="supportsDirection" type="checkbox" hidden="true" defaultValue="false"/>
+            <Field id="entityKeyMap" type="textfield" hidden="true" defaultValue=""/>
+        </ConfigUI>
+        <States>
+            <State id="connected"><ValueType>Boolean</ValueType><TriggerLabel>Connected Changed</TriggerLabel><ControlPageLabel>Connected</ControlPageLabel></State>
+            <State id="status"><ValueType>String</ValueType><TriggerLabel>Status Changed</TriggerLabel><ControlPageLabel>Status</ControlPageLabel></State>
+            <State id="oscillating"><ValueType>Boolean</ValueType><TriggerLabel>Oscillating Changed</TriggerLabel><ControlPageLabel>Oscillating</ControlPageLabel></State>
+            <State id="direction"><ValueType>String</ValueType><TriggerLabel>Direction Changed</TriggerLabel><ControlPageLabel>Direction</ControlPageLabel></State>
+            <State id="lastSeen"><ValueType>String</ValueType><TriggerLabel>Last Seen Changed</TriggerLabel><ControlPageLabel>Last Seen</ControlPageLabel></State>
+        </States>
+    </Device>
+
+    <!-- ============================================================
+         esphomeCover - dimmer-class node (primary entity = Cover)
+         ============================================================ -->
     <Device type="dimmer" id="esphomeCover">
-        <Name>ESPHome Cover</Name>
+        <Name>ESPHome Cover Node</Name>
         <ConfigUI>
-            <Field id="address" type="textfield" defaultValue="">
-                <Label>Compound Address (mac_entity):</Label>
-            </Field>
-            <Field id="nodeMac" type="textfield" defaultValue="">
-                <Label>Node MAC:</Label>
-            </Field>
-            <Field id="entityKey" type="textfield" defaultValue="">
-                <Label>Entity Key:</Label>
-            </Field>
-            <Field id="entityName" type="textfield" readonly="true" defaultValue="">
-                <Label>Entity Name:</Label>
-            </Field>
+            <Field id="address" type="textfield" defaultValue=""><Label>MAC Address:</Label></Field>
+            <Field id="hostname" type="textfield" defaultValue=""><Label>Hostname:</Label></Field>
+            <Field id="ip" type="textfield" defaultValue=""><Label>IP Address:</Label></Field>
+            <Field id="port" type="textfield" defaultValue="6053"><Label>API Port:</Label></Field>
+            <Field id="encryptionKey" type="textfield" defaultValue=""><Label>API Encryption Key (Base64):</Label></Field>
+            <Field id="boardModel" type="textfield" readonly="true" defaultValue=""><Label>Board:</Label></Field>
+            <Field id="esphomeVersion" type="textfield" readonly="true" defaultValue=""><Label>ESPHome Version:</Label></Field>
             <Field id="supportsPosition" type="checkbox" hidden="true" defaultValue="true"/>
-            <Field id="supportsTilt"     type="checkbox" hidden="true" defaultValue="false"/>
-            <Field id="deviceClass" type="textfield" readonly="true" defaultValue="">
-                <Label>Device Class:</Label>
-            </Field>
+            <Field id="supportsTilt" type="checkbox" hidden="true" defaultValue="false"/>
+            <Field id="deviceClass" type="textfield" readonly="true" defaultValue=""><Label>Device Class:</Label></Field>
+            <Field id="entityKeyMap" type="textfield" hidden="true" defaultValue=""/>
         </ConfigUI>
         <States>
-            <State id="currentOperation">
-                <ValueType>String</ValueType>
-                <TriggerLabel>Operation Changed</TriggerLabel>
-                <ControlPageLabel>Operation</ControlPageLabel>
-            </State>
-            <State id="lastSeen">
-                <ValueType>String</ValueType>
-                <TriggerLabel>Last Seen Changed</TriggerLabel>
-                <ControlPageLabel>Last Seen</ControlPageLabel>
-            </State>
+            <State id="connected"><ValueType>Boolean</ValueType><TriggerLabel>Connected Changed</TriggerLabel><ControlPageLabel>Connected</ControlPageLabel></State>
+            <State id="status"><ValueType>String</ValueType><TriggerLabel>Status Changed</TriggerLabel><ControlPageLabel>Status</ControlPageLabel></State>
+            <State id="currentOperation"><ValueType>String</ValueType><TriggerLabel>Operation Changed</TriggerLabel><ControlPageLabel>Operation</ControlPageLabel></State>
+            <State id="lastSeen"><ValueType>String</ValueType><TriggerLabel>Last Seen Changed</TriggerLabel><ControlPageLabel>Last Seen</ControlPageLabel></State>
         </States>
     </Device>
 
-    <!-- =============================================================
-         esphomeLock - lock entity (relay class)
-         onState=True means LOCKED. TurnOn=lock, TurnOff=unlock.
-         ============================================================= -->
-    <Device type="relay" id="esphomeLock">
-        <Name>ESPHome Lock</Name>
-        <ConfigUI>
-            <Field id="address" type="textfield" defaultValue="">
-                <Label>Compound Address (mac_entity):</Label>
-            </Field>
-            <Field id="nodeMac" type="textfield" defaultValue="">
-                <Label>Node MAC:</Label>
-            </Field>
-            <Field id="entityKey" type="textfield" defaultValue="">
-                <Label>Entity Key:</Label>
-            </Field>
-            <Field id="entityName" type="textfield" readonly="true" defaultValue="">
-                <Label>Entity Name:</Label>
-            </Field>
-            <Field id="supportsOpen" type="checkbox" hidden="true" defaultValue="false"/>
-            <Field id="requiresCode" type="checkbox" hidden="true" defaultValue="false"/>
-        </ConfigUI>
-        <States>
-            <State id="lockState">
-                <ValueType>String</ValueType>
-                <TriggerLabel>Lock State Changed</TriggerLabel>
-                <ControlPageLabel>Lock State</ControlPageLabel>
-            </State>
-            <State id="lastSeen">
-                <ValueType>String</ValueType>
-                <TriggerLabel>Last Seen Changed</TriggerLabel>
-                <ControlPageLabel>Last Seen</ControlPageLabel>
-            </State>
-        </States>
-    </Device>
-
-    <!-- =============================================================
-         esphomeNumber - settable numeric entity (slider in Indigo
-         via the Set Number Value custom action)
-         ============================================================= -->
-    <Device type="custom" id="esphomeNumber">
-        <Name>ESPHome Number</Name>
-        <ConfigUI>
-            <Field id="address" type="textfield" defaultValue="">
-                <Label>Compound Address (mac_entity):</Label>
-            </Field>
-            <Field id="nodeMac" type="textfield" defaultValue="">
-                <Label>Node MAC:</Label>
-            </Field>
-            <Field id="entityKey" type="textfield" defaultValue="">
-                <Label>Entity Key:</Label>
-            </Field>
-            <Field id="entityName" type="textfield" readonly="true" defaultValue="">
-                <Label>Entity Name:</Label>
-            </Field>
-            <Field id="minValue" type="textfield" readonly="true" defaultValue=""><Label>Min:</Label></Field>
-            <Field id="maxValue" type="textfield" readonly="true" defaultValue=""><Label>Max:</Label></Field>
-            <Field id="step"     type="textfield" readonly="true" defaultValue=""><Label>Step:</Label></Field>
-            <Field id="unit"     type="textfield" readonly="true" defaultValue=""><Label>Unit:</Label></Field>
-        </ConfigUI>
-        <States>
-            <State id="value">
-                <ValueType>Number</ValueType>
-                <TriggerLabel>Value Changed</TriggerLabel>
-                <ControlPageLabel>Value</ControlPageLabel>
-            </State>
-            <State id="lastSeen">
-                <ValueType>String</ValueType>
-                <TriggerLabel>Last Seen Changed</TriggerLabel>
-                <ControlPageLabel>Last Seen</ControlPageLabel>
-            </State>
-        </States>
-        <UiDisplayStateId>value</UiDisplayStateId>
-    </Device>
-
-    <!-- =============================================================
-         esphomeSelect - enum entity (dropdown via Set Select Option
-         custom action)
-         ============================================================= -->
-    <Device type="custom" id="esphomeSelect">
-        <Name>ESPHome Select</Name>
-        <ConfigUI>
-            <Field id="address" type="textfield" defaultValue="">
-                <Label>Compound Address (mac_entity):</Label>
-            </Field>
-            <Field id="nodeMac" type="textfield" defaultValue="">
-                <Label>Node MAC:</Label>
-            </Field>
-            <Field id="entityKey" type="textfield" defaultValue="">
-                <Label>Entity Key:</Label>
-            </Field>
-            <Field id="entityName" type="textfield" readonly="true" defaultValue="">
-                <Label>Entity Name:</Label>
-            </Field>
-            <Field id="options" type="textfield" readonly="true" defaultValue=""><Label>Options:</Label></Field>
-        </ConfigUI>
-        <States>
-            <State id="selected">
-                <ValueType>String</ValueType>
-                <TriggerLabel>Selection Changed</TriggerLabel>
-                <ControlPageLabel>Selected Option</ControlPageLabel>
-            </State>
-            <State id="lastSeen">
-                <ValueType>String</ValueType>
-                <TriggerLabel>Last Seen Changed</TriggerLabel>
-                <ControlPageLabel>Last Seen</ControlPageLabel>
-            </State>
-        </States>
-        <UiDisplayStateId>selected</UiDisplayStateId>
-    </Device>
-
-    <!-- =============================================================
-         esphomeClimate - HVAC / thermostat
-         ============================================================= -->
+    <!-- ============================================================
+         esphomeClimate - thermostat-class node (primary = Climate)
+         ============================================================ -->
     <Device type="thermostat" id="esphomeClimate">
-        <Name>ESPHome Climate</Name>
+        <Name>ESPHome Climate Node</Name>
         <ConfigUI>
-            <Field id="address" type="textfield" defaultValue="">
-                <Label>Compound Address (mac_entity):</Label>
-            </Field>
-            <Field id="nodeMac" type="textfield" defaultValue="">
-                <Label>Node MAC:</Label>
-            </Field>
-            <Field id="entityKey" type="textfield" defaultValue="">
-                <Label>Entity Key:</Label>
-            </Field>
-            <Field id="entityName" type="textfield" readonly="true" defaultValue="">
-                <Label>Entity Name:</Label>
-            </Field>
-            <Field id="visualMin" type="textfield" readonly="true" defaultValue="">
-                <Label>Min Temp:</Label>
-            </Field>
-            <Field id="visualMax" type="textfield" readonly="true" defaultValue="">
-                <Label>Max Temp:</Label>
-            </Field>
-            <Field id="supportedModes" type="textfield" readonly="true" defaultValue="">
-                <Label>Modes:</Label>
-            </Field>
+            <Field id="address" type="textfield" defaultValue=""><Label>MAC Address:</Label></Field>
+            <Field id="hostname" type="textfield" defaultValue=""><Label>Hostname:</Label></Field>
+            <Field id="ip" type="textfield" defaultValue=""><Label>IP Address:</Label></Field>
+            <Field id="port" type="textfield" defaultValue="6053"><Label>API Port:</Label></Field>
+            <Field id="encryptionKey" type="textfield" defaultValue=""><Label>API Encryption Key (Base64):</Label></Field>
+            <Field id="boardModel" type="textfield" readonly="true" defaultValue=""><Label>Board:</Label></Field>
+            <Field id="esphomeVersion" type="textfield" readonly="true" defaultValue=""><Label>ESPHome Version:</Label></Field>
+            <Field id="visualMin" type="textfield" readonly="true" defaultValue="0"><Label>Min Temperature:</Label></Field>
+            <Field id="visualMax" type="textfield" readonly="true" defaultValue="0"><Label>Max Temperature:</Label></Field>
+            <Field id="supportedModes" type="textfield" readonly="true" defaultValue=""><Label>Supported Modes:</Label></Field>
             <Field id="twoPoint" type="checkbox" hidden="true" defaultValue="false"/>
             <Field id="NumTemperatureInputs" type="textfield" hidden="true" defaultValue="1"/>
-            <Field id="NumHumidityInputs"    type="textfield" hidden="true" defaultValue="0"/>
+            <Field id="NumHumidityInputs" type="textfield" hidden="true" defaultValue="0"/>
+            <Field id="SupportsHvacOperationMode" type="checkbox" hidden="true" defaultValue="true"/>
+            <Field id="SupportsHvacFanMode" type="checkbox" hidden="true" defaultValue="false"/>
             <Field id="SupportsHeatSetpoint" type="checkbox" hidden="true" defaultValue="true"/>
             <Field id="SupportsCoolSetpoint" type="checkbox" hidden="true" defaultValue="true"/>
-            <Field id="SupportsHvacOperationMode" type="checkbox" hidden="true" defaultValue="true"/>
-            <Field id="SupportsHvacFanMode"  type="checkbox" hidden="true" defaultValue="false"/>
+            <Field id="ShowCoolHeatEquipmentStateUI" type="checkbox" hidden="true" defaultValue="true"/>
+            <Field id="entityKeyMap" type="textfield" hidden="true" defaultValue=""/>
         </ConfigUI>
         <States>
-            <State id="action">
-                <ValueType>String</ValueType>
-                <TriggerLabel>HVAC Action Changed</TriggerLabel>
-                <ControlPageLabel>Action</ControlPageLabel>
-            </State>
-            <State id="preset">
-                <ValueType>String</ValueType>
-                <TriggerLabel>Preset Changed</TriggerLabel>
-                <ControlPageLabel>Preset</ControlPageLabel>
-            </State>
-            <State id="lastSeen">
-                <ValueType>String</ValueType>
-                <TriggerLabel>Last Seen Changed</TriggerLabel>
-                <ControlPageLabel>Last Seen</ControlPageLabel>
-            </State>
+            <State id="connected"><ValueType>Boolean</ValueType><TriggerLabel>Connected Changed</TriggerLabel><ControlPageLabel>Connected</ControlPageLabel></State>
+            <State id="status"><ValueType>String</ValueType><TriggerLabel>Status Changed</TriggerLabel><ControlPageLabel>Status</ControlPageLabel></State>
+            <State id="action"><ValueType>String</ValueType><TriggerLabel>HVAC Action Changed</TriggerLabel><ControlPageLabel>HVAC Action</ControlPageLabel></State>
+            <State id="preset"><ValueType>String</ValueType><TriggerLabel>Preset Changed</TriggerLabel><ControlPageLabel>Preset</ControlPageLabel></State>
+            <State id="lastSeen"><ValueType>String</ValueType><TriggerLabel>Last Seen Changed</TriggerLabel><ControlPageLabel>Last Seen</ControlPageLabel></State>
         </States>
     </Device>
 
-    <!-- =============================================================
-         esphomeLight - dimmer/CT/RGB light
-         ============================================================= -->
-    <Device type="dimmer" id="esphomeLight">
-        <Name>ESPHome Light</Name>
+    <!-- ============================================================
+         esphomeLock - relay-class node (primary entity = Lock)
+         onState=true means LOCKED.
+         ============================================================ -->
+    <Device type="relay" id="esphomeLock">
+        <Name>ESPHome Lock Node</Name>
         <ConfigUI>
-            <Field id="address" type="textfield" defaultValue="">
-                <Label>Compound Address (mac_entity):</Label>
-            </Field>
-            <Field id="nodeMac" type="textfield" defaultValue="">
-                <Label>Node MAC:</Label>
-            </Field>
-            <Field id="entityKey" type="textfield" defaultValue="">
-                <Label>Entity Key:</Label>
-            </Field>
-            <Field id="entityName" type="textfield" readonly="true" defaultValue="">
-                <Label>Entity Name:</Label>
-            </Field>
-            <Field id="SupportsColor"            type="checkbox" hidden="true" defaultValue="false"/>
-            <Field id="SupportsRGB"              type="checkbox" hidden="true" defaultValue="false"/>
-            <Field id="SupportsWhite"            type="checkbox" hidden="true" defaultValue="false"/>
-            <Field id="SupportsWhiteTemperature" type="checkbox" hidden="true" defaultValue="false"/>
+            <Field id="address" type="textfield" defaultValue=""><Label>MAC Address:</Label></Field>
+            <Field id="hostname" type="textfield" defaultValue=""><Label>Hostname:</Label></Field>
+            <Field id="ip" type="textfield" defaultValue=""><Label>IP Address:</Label></Field>
+            <Field id="port" type="textfield" defaultValue="6053"><Label>API Port:</Label></Field>
+            <Field id="encryptionKey" type="textfield" defaultValue=""><Label>API Encryption Key (Base64):</Label></Field>
+            <Field id="boardModel" type="textfield" readonly="true" defaultValue=""><Label>Board:</Label></Field>
+            <Field id="esphomeVersion" type="textfield" readonly="true" defaultValue=""><Label>ESPHome Version:</Label></Field>
+            <Field id="supportsOpen" type="checkbox" hidden="true" defaultValue="false"/>
+            <Field id="requiresCode" type="checkbox" hidden="true" defaultValue="false"/>
+            <Field id="entityKeyMap" type="textfield" hidden="true" defaultValue=""/>
         </ConfigUI>
         <States>
-            <State id="colorTemp">
-                <ValueType>Integer</ValueType>
-                <TriggerLabel>Color Temp Changed</TriggerLabel>
-                <ControlPageLabel>Color Temp K</ControlPageLabel>
-            </State>
-            <State id="lastSeen">
-                <ValueType>String</ValueType>
-                <TriggerLabel>Last Seen Changed</TriggerLabel>
-                <ControlPageLabel>Last Seen</ControlPageLabel>
-            </State>
+            <State id="connected"><ValueType>Boolean</ValueType><TriggerLabel>Connected Changed</TriggerLabel><ControlPageLabel>Connected</ControlPageLabel></State>
+            <State id="status"><ValueType>String</ValueType><TriggerLabel>Status Changed</TriggerLabel><ControlPageLabel>Status</ControlPageLabel></State>
+            <State id="lockState"><ValueType>String</ValueType><TriggerLabel>Lock State Changed</TriggerLabel><ControlPageLabel>Lock State</ControlPageLabel></State>
+            <State id="lastSeen"><ValueType>String</ValueType><TriggerLabel>Last Seen Changed</TriggerLabel><ControlPageLabel>Last Seen</ControlPageLabel></State>
         </States>
     </Device>
 

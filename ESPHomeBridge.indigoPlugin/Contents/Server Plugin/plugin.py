@@ -6,7 +6,7 @@
 #              maps each ESPHome entity to a native Indigo device.
 # Author:      CliveS & Claude Opus 4.7
 # Date:        20-05-2026
-# Version:     0.3.0
+# Version:     0.4.0
 
 try:
     import indigo
@@ -14,7 +14,9 @@ except ImportError:
     pass
 
 import asyncio
+import json
 import os
+import re
 import sys
 import threading
 import time
@@ -37,7 +39,7 @@ except ImportError:
 # ============================================================
 
 PLUGIN_ID      = "com.clives.indigoplugin.esphomebridge"
-PLUGIN_VERSION = "0.3.0"
+PLUGIN_VERSION = "0.4.0"
 
 DEVICE_FOLDER_NAME = "ESPHome"
 
@@ -143,6 +145,13 @@ class Plugin(indigo.PluginBase):
             )
             return
 
+        # One-shot v0.4.0 migration: pre-v0.4.0 plugin created one Indigo
+        # device per ESPHome entity (often 20+ devices per node). v0.4.0
+        # switches to one Indigo device per ESPHome node (Tasmota-style)
+        # with all entities as custom states on that single device. Wipe
+        # all legacy devices; mDNS discovery will recreate them correctly.
+        self._migrate_to_v040()
+
         # Start the asyncio loop in a dedicated thread
         self.async_loop = asyncio.new_event_loop()
         self.async_thread = threading.Thread(
@@ -160,6 +169,257 @@ class Plugin(indigo.PluginBase):
         # Kick off the main coroutine
         asyncio.run_coroutine_threadsafe(self._async_main(), self.async_loop)
         self.logger.info("ESPHome Bridge async loop running")
+
+    def _migrate_to_v040(self):
+        """One-shot migration from v0.3.x to v0.4.0.
+
+        Pre-v0.4.0 the plugin created one Indigo device per ESPHome entity
+        (typically 20+ devices per node — Power, Voltage, Energy, IP Address,
+        MAC Address, ...). v0.4.0 collapses that to one Indigo device per
+        ESPHome node (Tasmota-style), with all the per-entity values as
+        custom states on that one device.
+
+        Migration:
+          1. Snapshot encryptionKey from every existing esphomeNode device
+             into pluginPrefs.migration_v040_saved_keys so they can be
+             restored when the new node devices are auto-recreated on
+             mDNS discovery.
+          2. Delete ALL devices that belong to this plugin. The next mDNS
+             round will recreate them with the v0.4.0 model.
+          3. Mark migration complete in pluginPrefs.migrated_v040 so we
+             never run again.
+        """
+        if self.pluginPrefs.get("migrated_v040", False):
+            return
+        saved_keys = {}
+        ids_to_delete = []
+        for dev in indigo.devices.iter(self.pluginId):
+            # Preserve encryption keys keyed on MAC (the node device's address)
+            if dev.deviceTypeId == "esphomeNode":
+                key = (dev.pluginProps.get("encryptionKey", "") or "").strip()
+                if key:
+                    saved_keys[dev.address] = key
+            ids_to_delete.append((dev.id, dev.name))
+        try:
+            self.pluginPrefs["migration_v040_saved_keys"] = json.dumps(saved_keys)
+        except Exception as exc:
+            self.logger.debug(f"failed to save migration keys: {exc}")
+        deleted = 0
+        for dev_id, name in ids_to_delete:
+            try:
+                indigo.device.delete(dev_id)
+                deleted += 1
+            except Exception as exc:
+                self.logger.warning(f"failed to delete legacy device {name} (id={dev_id}): {exc}")
+        self.pluginPrefs["migrated_v040"] = True
+        self.logger.warning(
+            f"=== v0.4.0 migration: deleted {deleted} legacy device(s); "
+            f"preserved {len(saved_keys)} encryption key(s). "
+            "New one-per-node devices will be created on next mDNS discovery. ==="
+        )
+
+    # ========== v0.4.0 helpers: classify + map entities to states ==========
+
+    _STATE_ID_OVERRIDES = {
+        # entity_name -> state_id when the default camelCase isn't ideal
+        "IP Address":            "ipAddress",
+        "Mac Address":           "macAddress",
+        "MAC Address":           "macAddress",
+        "WiFi Signal dB":        "wifiSignalDb",
+        "WiFi Signal Percent":   "wifiSignalPercent",
+        "Connected SSID":        "connectedSsid",
+        "Total Energy":          "totalEnergy",
+        "Total Energy Since Boot": "totalEnergySinceBoot",
+        "Last Restart":          "lastRestart",
+        "Status LED":            "statusLed",
+        "Power Factor":          "powerFactor",
+        "Apparent Power":        "apparentPower",
+        "Reactive Power":        "reactivePower",
+    }
+
+    # Priority list: first entity-info class found on a node becomes the
+    # node's primary control type. Lock wins over Climate, Climate over
+    # Switch, etc. — the rationale is "what the user most-likely cares
+    # about controlling". If a node has none of these, it becomes a
+    # plain esphomeNode (info-only, sensor states still attached).
+    _PRIMARY_TYPE_PRIORITY = [
+        ("LockInfo",    "esphomeLock"),
+        ("ClimateInfo", "esphomeClimate"),
+        ("SwitchInfo",  "esphomeSwitch"),
+        ("LightInfo",   "esphomeLight"),
+        ("FanInfo",     "esphomeFan"),
+        ("CoverInfo",   "esphomeCover"),
+    ]
+
+    _OUR_DEVICE_TYPES = {
+        "esphomeNode", "esphomeSwitch", "esphomeLight", "esphomeFan",
+        "esphomeCover", "esphomeClimate", "esphomeLock",
+    }
+
+    def _to_state_id(self, name):
+        """Convert ESPHome entity name to a valid Indigo state ID.
+
+        Indigo rules (discovered the hard way in Zigbee2MQTTBridge v1.7):
+          - camelCase ASCII only — NO underscores even though XML allows them
+          - must start with a letter, all chars alnum
+          - pluginProps keys (and state IDs) must not begin with `_`
+        """
+        if name in self._STATE_ID_OVERRIDES:
+            return self._STATE_ID_OVERRIDES[name]
+        parts = [p for p in re.split(r"[^A-Za-z0-9]+", name or "") if p]
+        if not parts:
+            return ""
+        out = parts[0][0].lower() + parts[0][1:] if parts[0] else ""
+        for p in parts[1:]:
+            if not p:
+                continue
+            out += p[0].upper() + p[1:].lower() if len(p) > 1 else p.upper()
+        out = "".join(c for c in out if c.isascii() and c.isalnum())
+        if not out or not out[0].isalpha():
+            out = "x" + out
+        return out
+
+    def _classify_node_type(self, entities):
+        """Pick the Indigo deviceTypeId for a node based on its entities.
+
+        Returns (type_id, primary_entity_or_None).
+        """
+        from aioesphomeapi import (
+            SwitchInfo, LightInfo, FanInfo, CoverInfo,
+            ClimateInfo, LockInfo,
+        )
+        type_class_map = {
+            "LockInfo":    LockInfo,
+            "ClimateInfo": ClimateInfo,
+            "SwitchInfo":  SwitchInfo,
+            "LightInfo":   LightInfo,
+            "FanInfo":     FanInfo,
+            "CoverInfo":   CoverInfo,
+        }
+        for cls_name, type_id in self._PRIMARY_TYPE_PRIORITY:
+            cls = type_class_map[cls_name]
+            for e in entities:
+                if isinstance(e, cls):
+                    return type_id, e
+        return "esphomeNode", None
+
+    def _build_entity_key_map(self, entities, primary_entity):
+        """Build the entityKeyMap (stored in pluginProps as JSON).
+
+        Maps state_id -> {key, kind, name, unit, options} where:
+          - key: ESPHome entity key (int)
+          - kind: sensor|text|binary|number|select|button|light|switch|fan|cover
+          - name: display name from ESPHome
+          - unit: unit_of_measurement if applicable
+          - options: select-option list (csv) if kind==select
+
+        The PRIMARY entity is also included so action callbacks can find
+        its key under a known state_id (`primary`).
+        """
+        from aioesphomeapi import (
+            SensorInfo, TextSensorInfo, BinarySensorInfo,
+            NumberInfo, SelectInfo, ButtonInfo, LightInfo, SwitchInfo,
+            FanInfo, CoverInfo, LockInfo, ClimateInfo,
+        )
+        kind_for = [
+            (LockInfo,         "lock"),
+            (ClimateInfo,      "climate"),
+            (SwitchInfo,       "switch"),
+            (LightInfo,        "light"),
+            (FanInfo,          "fan"),
+            (CoverInfo,        "cover"),
+            (SensorInfo,       "sensor"),
+            (TextSensorInfo,   "text"),
+            (BinarySensorInfo, "binary"),
+            (NumberInfo,       "number"),
+            (SelectInfo,       "select"),
+            (ButtonInfo,       "button"),
+        ]
+        primary_key = getattr(primary_entity, "key", None) if primary_entity else None
+        out = {}
+        used_ids = set()
+        # The primary entity gets state_id="primary" — actions look it up here.
+        if primary_entity is not None:
+            kind = "node"
+            for cls, k in kind_for:
+                if isinstance(primary_entity, cls):
+                    kind = k
+                    break
+            out["primary"] = {
+                "key":  int(primary_entity.key),
+                "kind": kind,
+                "name": primary_entity.name or primary_entity.object_id or "",
+                "unit": getattr(primary_entity, "unit_of_measurement", "") or "",
+            }
+            used_ids.add("primary")
+        for e in entities:
+            if primary_key is not None and getattr(e, "key", None) == primary_key:
+                continue
+            kind = None
+            for cls, k in kind_for:
+                if isinstance(e, cls):
+                    kind = k
+                    break
+            if kind is None:
+                continue
+            base = self._to_state_id(e.name or e.object_id or "")
+            if not base:
+                continue
+            state_id = base
+            n = 2
+            while state_id in used_ids:
+                state_id = f"{base}{n}"
+                n += 1
+            used_ids.add(state_id)
+            info = {
+                "key":  int(e.key),
+                "kind": kind,
+                "name": e.name or e.object_id or "",
+                "unit": getattr(e, "unit_of_measurement", "") or "",
+            }
+            if kind == "select":
+                info["options"] = list(getattr(e, "options", []) or [])
+            if kind == "number":
+                info["min"]  = float(getattr(e, "min_value", 0) or 0)
+                info["max"]  = float(getattr(e, "max_value", 0) or 0)
+                info["step"] = float(getattr(e, "step",      1) or 1)
+            out[state_id] = info
+        return out
+
+    def getDeviceStateList(self, dev):
+        """Add dynamic states declared in pluginProps.entityKeyMap to the
+        base state list from Devices.xml. Per Indigo's gotcha rules
+        (Zigbee2MQTTBridge v1.7 lesson): always make a COPY of the base
+        list before appending — the parser returns a live reference and
+        mutating it permanently corrupts subsequent reads.
+        """
+        state_list = list(indigo.PluginBase.getDeviceStateList(self, dev) or [])
+        if dev.deviceTypeId not in self._OUR_DEVICE_TYPES:
+            return state_list
+        try:
+            em = json.loads(dev.pluginProps.get("entityKeyMap", "") or "{}")
+        except Exception:
+            return state_list
+        for sid, info in em.items():
+            if sid == "primary":
+                continue  # primary's data goes to native states (onOffState etc)
+            kind = info.get("kind", "sensor")
+            label = info.get("name", sid)
+            if kind in ("sensor", "number"):
+                state_list.append(self.getDeviceStateDictForNumberType(sid, label, label))
+            elif kind in ("text", "select"):
+                state_list.append(self.getDeviceStateDictForStringType(sid, label, label))
+            elif kind == "binary":
+                state_list.append(self.getDeviceStateDictForBoolOnOffType(sid, label, label))
+            elif kind in ("switch", "light", "fan", "cover", "lock"):
+                # Secondary control entities: expose as on/off plus a brightness
+                # state for light/fan/cover. For now just a bool — full
+                # secondary-control devices are a future enhancement.
+                state_list.append(self.getDeviceStateDictForBoolOnOffType(sid, label, label))
+                if kind in ("light", "fan", "cover"):
+                    state_list.append(self.getDeviceStateDictForNumberType(
+                        sid + "Level", label + " Level", label + " Level"))
+        return state_list
 
     def shutdown(self):
         if self.async_loop and self.async_loop.is_running():
@@ -315,9 +575,14 @@ class Plugin(indigo.PluginBase):
 
         while True:
             # Resolve encryption key fresh on each iteration so a key clear
-            # (e.g. after a "device is plaintext" error) takes effect on retry
+            # (e.g. after a "device is plaintext" error) takes effect on retry.
+            # v0.4.0: also consult the migration-saved keys snapshot — the
+            # node device may not exist yet at first-connect, but a key
+            # preserved across the v0.4.0 migration must still apply.
             node_dev = self._find_node_device(mac)
             per_device_key = node_dev.pluginProps.get("encryptionKey", "") if node_dev else ""
+            if not per_device_key:
+                per_device_key = self._migration_saved_keys().get(mac, "")
             encryption_key = per_device_key or self.default_encryption_key or None
             client = APIClient(
                 d["ip"], d["port"], password=None,
@@ -343,10 +608,12 @@ class Plugin(indigo.PluginBase):
                     f"esphome {device_info.esphome_version}, model {device_info.model}"
                 )
 
+                # v0.4.0: one Indigo device per node. _ensure_node_device
+                # picks the device type from the node's entity list and
+                # stores the entityKeyMap so state writes can be routed
+                # by entity_key. No per-entity device creation any more.
                 if self.auto_create_nodes:
-                    self._ensure_node_device(mac, device_info)
-                if self.auto_create_entities:
-                    self._ensure_entity_devices(mac, entities)
+                    self._ensure_node_device(mac, device_info, entities)
 
                 # subscribe_states is SYNCHRONOUS in aioesphomeapi (takes a
                 # callback, returns an unsubscribe callable). No await.
@@ -441,24 +708,39 @@ class Plugin(indigo.PluginBase):
             backoff = min(backoff * 2, RECONNECT_BACKOFF_MAX)
 
     def _on_entity_state(self, mac, state):
-        """Called from the asyncio thread when an entity state update arrives.
-        Indigo's updateStateOnServer is thread-safe so we can write directly.
-        """
-        # state is one of: SwitchState, SensorState, BinarySensorState, LightState, etc.
-        # All have .key matching the entity key from list_entities_services.
+        """v0.4.0: state updates land on the SINGLE node device for this
+        MAC. Look up which state_id this entity_key maps to via the
+        device's entityKeyMap, then route the write either to native
+        states (if this is the primary entity) or to the corresponding
+        custom state."""
         key = getattr(state, "key", None)
         if key is None:
             return
-        compound_addr = f"{mac}_{key}"
-        dev = self.entity_devices.get(compound_addr) or self._find_entity_device(compound_addr)
+        dev = self._find_node_device(mac)
         if dev is None:
             return
-
         try:
-            self._apply_state_to_device(dev, state)
+            em = json.loads(dev.pluginProps.get("entityKeyMap", "") or "{}")
+        except Exception:
+            return
+        # Find which state_id this entity belongs to (key -> state_id)
+        state_id = None
+        info = None
+        for sid, einfo in em.items():
+            if int(einfo.get("key", -1)) == int(key):
+                state_id = sid
+                info = einfo
+                break
+        if state_id is None:
+            # Entity not in the map — was added after device creation.
+            # A future enhancement could re-run _ensure_node_device to
+            # rebuild the map. For now, drop silently.
+            return
+        try:
+            self._apply_v040_state(dev, state, state_id, info)
             dev.updateStateOnServer("lastSeen", datetime.now().isoformat(timespec="seconds"))
         except Exception:
-            self.logger.exception(f"Failed to apply state to {dev.name}")
+            self.logger.exception(f"Failed to apply state to {dev.name} ({state_id})")
 
     # ESPHome ClimateMode enum (protobuf int) -> Indigo HvacMode
     # See aioesphomeapi.model.ClimateMode for the ESPHome int values.
@@ -479,6 +761,84 @@ class Plugin(indigo.PluginBase):
         2: 2,    # Cool      -> ESPHome COOL
         3: 1,    # HeatCool  -> ESPHome HEAT_COOL
     }
+
+    def _apply_v040_state(self, dev, state, state_id, info):
+        """v0.4.0 state writer.
+
+        If state_id == "primary" we're getting an update for the entity
+        that backs the node's Indigo device type (Lock/Climate/Switch/
+        Light/Fan/Cover). Route into the native Indigo states for that
+        device type (onOffState, brightnessLevel, hvacOperationMode, etc.)
+        by delegating to the existing v0.3.x _apply_state_to_device logic
+        — that handler is unchanged because the writes it makes (e.g.
+        onOffState, brightnessLevel) are correct for the new model too.
+
+        Otherwise this is a secondary entity that lives as a custom
+        state on the device — write the value into that state.
+        """
+        from aioesphomeapi import (
+            SwitchState, SensorState, BinarySensorState, LightState,
+            TextSensorState, FanState, CoverState, ClimateState,
+            LockEntityState, NumberState, SelectState,
+        )
+        if state_id == "primary":
+            # Delegate to legacy handler — its writes target the native
+            # Indigo states (onOffState, brightnessLevel, hvacOperationMode)
+            # which is exactly what we want for the primary entity.
+            self._apply_state_to_device(dev, state)
+            return
+
+        # Secondary entity — write to the dynamic state.
+        kind = info.get("kind", "sensor")
+        if isinstance(state, SensorState):
+            if getattr(state, "missing_state", False):
+                return
+            try:
+                val = float(state.state)
+                unit = info.get("unit", "")
+                dev.updateStateOnServer(state_id, val,
+                    uiValue=(f"{val:g} {unit}" if unit else f"{val:g}"))
+            except (TypeError, ValueError):
+                dev.updateStateOnServer(state_id, str(state.state))
+        elif isinstance(state, TextSensorState):
+            if getattr(state, "missing_state", False):
+                return
+            dev.updateStateOnServer(state_id, str(state.state))
+        elif isinstance(state, BinarySensorState):
+            dev.updateStateOnServer(state_id, bool(state.state))
+        elif isinstance(state, NumberState):
+            if getattr(state, "missing_state", False):
+                return
+            try:
+                dev.updateStateOnServer(state_id, float(state.state))
+            except (TypeError, ValueError):
+                pass
+        elif isinstance(state, SelectState):
+            if getattr(state, "missing_state", False):
+                return
+            dev.updateStateOnServer(state_id, str(state.state))
+        elif isinstance(state, SwitchState):
+            dev.updateStateOnServer(state_id, bool(state.state))
+        elif isinstance(state, LightState):
+            # Secondary light (e.g. Athom Status LED) — bool + Level
+            dev.updateStatesOnServer([
+                {"key": state_id,            "value": bool(state.state)},
+                {"key": state_id + "Level",  "value": int(round((getattr(state, "brightness", 0) or 0) * 100))},
+            ])
+        elif isinstance(state, FanState):
+            dev.updateStateOnServer(state_id, bool(state.state))
+        elif isinstance(state, CoverState):
+            pos = getattr(state, "position", None)
+            updates = [{"key": state_id, "value": pos is not None and pos > 0}]
+            if pos is not None:
+                updates.append({"key": state_id + "Level", "value": int(round(pos * 100))})
+            dev.updateStatesOnServer(updates)
+        elif isinstance(state, LockEntityState):
+            try:
+                lock_int = int(state.state) if state.state is not None else 0
+            except (TypeError, ValueError):
+                lock_int = 0
+            dev.updateStateOnServer(state_id, lock_int in (1, 4, 5))  # LOCKED-ish
 
     def _apply_state_to_device(self, dev, state):
         """Translate an ESPHome state object into Indigo state writes."""
@@ -690,10 +1050,13 @@ class Plugin(indigo.PluginBase):
             self.logger.debug(f"node status update failed for {mac}: {exc}")
 
     def _find_node_device(self, mac):
+        """v0.4.0: there is now exactly one Indigo device per MAC, of one
+        of several types (esphomeNode/Switch/Light/Fan/Cover/Climate/Lock)
+        depending on the node's primary entity. Address is always the MAC."""
         if mac in self.nodes_by_mac:
             return self.nodes_by_mac[mac]
         for d in indigo.devices.iter("self"):
-            if d.deviceTypeId == "esphomeNode" and d.address == mac:
+            if d.address == mac and d.deviceTypeId in self._OUR_DEVICE_TYPES:
                 self.nodes_by_mac[mac] = d
                 return d
         return None
@@ -707,67 +1070,189 @@ class Plugin(indigo.PluginBase):
                 return d
         return None
 
-    def _ensure_node_device(self, mac, device_info):
+    def _ensure_node_device(self, mac, device_info, entities):
+        """v0.4.0 one-device-per-node creator.
+
+        Picks the Indigo device type from the entity list (Lock > Climate >
+        Switch > Light > Fan > Cover > else esphomeNode), builds the
+        entityKeyMap describing every entity's state ID + kind, and
+        creates or updates the single Indigo device for this node.
+
+        On create, looks up any saved encryption key from the v0.4.0
+        migration snapshot and applies it so encrypted-rig style nodes
+        don't need their key re-entered after the upgrade.
+        """
+        ip   = self.discovered[mac]["ip"]
+        port = self.discovered[mac]["port"]
+        host = self.discovered[mac]["hostname"]
+        board = getattr(device_info, "model", "") or ""
+        esp_v = getattr(device_info, "esphome_version", "") or ""
+
+        type_id, primary_entity = self._classify_node_type(entities)
+        entity_key_map = self._build_entity_key_map(entities, primary_entity)
+
+        # Per-type extra pluginProps (capabilities derived from primary entity)
+        extra_props = self._props_for_primary(type_id, primary_entity)
+
         existing = self._find_node_device(mac)
         if existing:
-            # Update read-only props if changed
-            props = dict(existing.pluginProps)
-            updates = {
-                "ip":             self.discovered[mac]["ip"],
-                "port":           str(self.discovered[mac]["port"]),
-                "hostname":       self.discovered[mac]["hostname"],
-                "boardModel":     getattr(device_info, "model", "") or "",
-                "esphomeVersion": getattr(device_info, "esphome_version", "") or "",
-            }
-            changed = False
-            for k, v in updates.items():
-                if v and props.get(k, "") != v:
-                    props[k] = v
-                    changed = True
-            if changed:
-                existing.replacePluginPropsOnServer(props)
-            try:
-                existing.updateStateOnServer("connected", True)
-                existing.updateStateOnServer("status",    "Online")
-            except Exception:
-                pass
-            return existing
+            # In-place update — but if Indigo's existing deviceTypeId doesn't
+            # match the type we'd pick now, we can't just rename it in place
+            # (Indigo forbids deviceTypeId changes). Delete + recreate.
+            if existing.deviceTypeId != type_id:
+                self.logger.info(
+                    f"{mac}: device type changed "
+                    f"{existing.deviceTypeId} -> {type_id}; recreating"
+                )
+                preserved_key = existing.pluginProps.get("encryptionKey", "")
+                try:
+                    indigo.device.delete(existing.id)
+                except Exception as exc:
+                    self.logger.warning(f"failed to delete old node device: {exc}")
+                # Fall through to create
+                existing = None
+                if preserved_key:
+                    saved = self._migration_saved_keys()
+                    saved[mac] = preserved_key
+                    self.pluginPrefs["migration_v040_saved_keys"] = json.dumps(saved)
+            else:
+                props = dict(existing.pluginProps)
+                props.update({
+                    "ip":             ip,
+                    "port":           str(port),
+                    "hostname":       host,
+                    "boardModel":     board,
+                    "esphomeVersion": esp_v,
+                    "entityKeyMap":   json.dumps(entity_key_map),
+                })
+                props.update(extra_props)
+                try:
+                    existing.replacePluginPropsOnServer(props)
+                    existing = indigo.devices[existing.id]   # re-fetch — stale
+                    existing.stateListOrDisplayStateIdChanged()
+                    existing.updateStateOnServer("connected", True)
+                    existing.updateStateOnServer("status",    "Online")
+                except Exception as exc:
+                    self.logger.debug(f"props/state update failed for {mac}: {exc}")
+                self.nodes_by_mac[mac] = existing
+                return existing
 
-        # Create new node device
+        # Create new device
         try:
             folder_id = self._ensure_device_folder(DEVICE_FOLDER_NAME)
             props = {
                 "address":        mac,
-                "hostname":       self.discovered[mac]["hostname"],
-                "ip":             self.discovered[mac]["ip"],
-                "port":           str(self.discovered[mac]["port"]),
-                "boardModel":     getattr(device_info, "model", "") or "",
-                "esphomeVersion": getattr(device_info, "esphome_version", "") or "",
+                "hostname":       host,
+                "ip":             ip,
+                "port":           str(port),
+                "boardModel":     board,
+                "esphomeVersion": esp_v,
+                "entityKeyMap":   json.dumps(entity_key_map),
             }
-            name = getattr(device_info, "name", "") or self.discovered[mac]["hostname"]
+            # Restore any preserved encryption key for this MAC
+            saved = self._migration_saved_keys()
+            if mac in saved:
+                props["encryptionKey"] = saved[mac]
+            props.update(extra_props)
+            name = host or getattr(device_info, "name", "") or mac
             dev = indigo.device.create(
                 protocol=indigo.kProtocol.Plugin,
                 pluginId=self.pluginId,
                 address=mac,
                 name=name,
-                deviceTypeId="esphomeNode",
+                deviceTypeId=type_id,
                 props=props,
                 folder=folder_id,
             )
-            ip = self.discovered[mac]["ip"]
-            dev.subModel = f"{ip} - {props['boardModel']}" if props['boardModel'] else ip
+            dev.subModel = f"{ip} - {board}" if board else ip
             dev.replaceOnServer()
+            dev = indigo.devices[dev.id]                     # re-fetch
+            dev.stateListOrDisplayStateIdChanged()
             dev.updateStateOnServer("connected", True)
             dev.updateStateOnServer("status",    "Online")
             self.nodes_by_mac[mac] = dev
-            self.logger.info(f"Created Indigo node device: {dev.name} ({mac}) in folder '{DEVICE_FOLDER_NAME}'")
+            self.logger.info(
+                f"Created Indigo device: {dev.name} ({mac}) type={type_id} "
+                f"with {len(entity_key_map)} entities mapped to states "
+                f"in folder '{DEVICE_FOLDER_NAME}'"
+            )
             return dev
         except Exception:
             self.logger.exception(f"Failed to create node device for {mac}")
             return None
 
+    def _props_for_primary(self, type_id, primary_entity):
+        """Capability flags / metadata derived from the primary entity for
+        each Indigo device type. These mirror the per-entity extra_props
+        used in the v0.3.x model (light SupportsRGB, fan speedLevels,
+        climate visualMin/Max, etc.) so the dimmer / thermostat / etc.
+        controls in Indigo's UI work natively."""
+        if primary_entity is None:
+            return {}
+        from aioesphomeapi import (
+            LightInfo, FanInfo, CoverInfo, ClimateInfo, LockInfo,
+        )
+        if isinstance(primary_entity, LightInfo) and type_id == "esphomeLight":
+            modes = set(getattr(primary_entity, "supported_color_modes", []) or [])
+            return {
+                "SupportsColor":            any(m >= 19 for m in modes),
+                "SupportsRGB":              any(m >= 19 for m in modes),
+                "SupportsWhite":            11 in modes or 27 in modes,
+                "SupportsWhiteTemperature": 11 in modes or 27 in modes,
+            }
+        if isinstance(primary_entity, FanInfo) and type_id == "esphomeFan":
+            return {
+                "speedLevels":         str(getattr(primary_entity, "supported_speed_count", 0) or 0),
+                "supportsOscillation": bool(getattr(primary_entity, "supports_oscillation", False)),
+                "supportsDirection":   bool(getattr(primary_entity, "supports_direction", False)),
+            }
+        if isinstance(primary_entity, CoverInfo) and type_id == "esphomeCover":
+            return {
+                "supportsPosition": bool(getattr(primary_entity, "supports_position", True)),
+                "supportsTilt":     bool(getattr(primary_entity, "supports_tilt", False)),
+                "deviceClass":      getattr(primary_entity, "device_class", "") or "",
+            }
+        if isinstance(primary_entity, LockInfo) and type_id == "esphomeLock":
+            return {
+                "supportsOpen": bool(getattr(primary_entity, "supports_open", False)),
+                "requiresCode": bool(getattr(primary_entity, "requires_code", False)),
+            }
+        if isinstance(primary_entity, ClimateInfo) and type_id == "esphomeClimate":
+            modes      = list(getattr(primary_entity, "supported_modes", []) or [])
+            mode_names = [str(m).upper() for m in modes]
+            has_heat   = any("HEAT" in n for n in mode_names)
+            has_cool   = any("COOL" in n for n in mode_names)
+            two_point  = bool(getattr(primary_entity, "supports_two_point_target_temperature", False))
+            return {
+                "visualMin":               str(getattr(primary_entity, "visual_min_temperature", 0) or 0),
+                "visualMax":               str(getattr(primary_entity, "visual_max_temperature", 0) or 0),
+                "supportedModes":          ", ".join(str(m).split(".")[-1] for m in modes),
+                "twoPoint":                two_point,
+                "NumTemperatureInputs":    "1" if getattr(primary_entity, "supports_current_temperature", False) else "0",
+                "SupportsHeatSetpoint":    has_heat or two_point,
+                "SupportsCoolSetpoint":    has_cool or two_point,
+                "SupportsHvacOperationMode": True,
+                "SupportsHvacFanMode":     bool(getattr(primary_entity, "supported_fan_modes", []) or []),
+            }
+        return {}
+
+    def _migration_saved_keys(self):
+        """Read the v0.4.0 migration's saved encryption-key snapshot."""
+        try:
+            return json.loads(self.pluginPrefs.get("migration_v040_saved_keys", "") or "{}")
+        except Exception:
+            return {}
+
     def _ensure_entity_devices(self, mac, entities):
-        """Auto-create one Indigo device per ESPHome entity we know how to map."""
+        """v0.4.0: entities no longer become Indigo devices. They are
+        mapped to custom states on the single node device by
+        _ensure_node_device(). This method is kept as a no-op for any
+        legacy code path that might still call it."""
+        return
+
+    def _ensure_entity_devices_LEGACY(self, mac, entities):
+        """Legacy v0.3.x one-device-per-entity creator. Retained for
+        reference only — no longer reached. Will be deleted in v0.5."""
         from aioesphomeapi import (
             SwitchInfo, SensorInfo, BinarySensorInfo, LightInfo, TextSensorInfo,
             FanInfo, CoverInfo, ClimateInfo, LockInfo, NumberInfo, SelectInfo,
@@ -784,8 +1269,16 @@ class Plugin(indigo.PluginBase):
             elif isinstance(e, SensorInfo):
                 type_id = "esphomeSensor"
                 extra_props["unit"] = getattr(e, "unit_of_measurement", "") or ""
+                # Tell Indigo this is NOT a relay. Hidden XML defaults are
+                # NOT applied at indigo.device.create() — must be in props.
+                extra_props["SupportsOnState"]     = False
+                extra_props["SupportsSensorValue"] = False
+                extra_props["isTextSensor"]        = False
             elif isinstance(e, TextSensorInfo):
                 type_id = "esphomeSensor"
+                extra_props["SupportsOnState"]     = False
+                extra_props["SupportsSensorValue"] = False
+                extra_props["isTextSensor"]        = True
             elif isinstance(e, LightInfo):
                 type_id = "esphomeLight"
                 modes = set(getattr(e, "supported_color_modes", []) or [])
@@ -875,17 +1368,19 @@ class Plugin(indigo.PluginBase):
     def actionControlDevice(self, action, dev):
         """Single Indigo dispatcher for both relay and dimmer actions.
 
-        Indigo's canonical plugin SDK uses actionControlDevice for ALL
-        device-control callbacks (relay turn-on/off/toggle AND dimmer
-        setBrightness/brightenBy/dimBy). The separate actionControlDimmer
-        method is NOT in the modern SDK and is silently ignored if defined
-        on its own. Always use actionControlDevice as the single entry point.
+        v0.4.0: dev is now the SINGLE node device, and the primary
+        entity's ESPHome key lives in pluginProps["entityKeyMap"]
+        under state_id "primary". Look it up there.
         """
-        mac = dev.pluginProps.get("nodeMac", "")
+        mac = dev.address                 # node device's address IS the MAC
         try:
-            key = int(dev.pluginProps.get("entityKey", "0"))
-        except (TypeError, ValueError):
-            self.logger.warning(f"{dev.name}: invalid entity key in pluginProps")
+            em = json.loads(dev.pluginProps.get("entityKeyMap", "") or "{}")
+            key = int(em.get("primary", {}).get("key", 0))
+        except Exception:
+            self.logger.warning(f"{dev.name}: entityKeyMap missing/invalid in pluginProps")
+            return
+        if not key:
+            self.logger.warning(f"{dev.name}: no primary entity key — node has no controllable entity")
             return
         conn = self.connections.get(mac, {})
         client = conn.get("client")
@@ -1081,25 +1576,79 @@ class Plugin(indigo.PluginBase):
     # Custom actions (Actions.xml)
     # --------------------------------------------------------
 
-    def _client_for(self, dev):
-        """Common helper: resolve the aioesphomeapi client + entity key for
-        a device-anchored custom action. Returns (client, key) or (None, 0)."""
-        mac = dev.pluginProps.get("nodeMac", "") or dev.address
+    def _client_and_key(self, dev, state_id):
+        """Resolve (client, entity_key) for a custom action targeting one
+        entity on a node device. state_id picks which entity in the
+        device's entityKeyMap to use.
+
+        Returns (client, key) or (None, 0). Logs the reason on failure.
+        """
+        mac = dev.address
         try:
-            key = int(dev.pluginProps.get("entityKey", "0") or 0)
+            em = json.loads(dev.pluginProps.get("entityKeyMap", "") or "{}")
+        except Exception:
+            self.logger.warning(f"{dev.name}: entityKeyMap missing/invalid")
+            return None, 0
+        info = em.get(state_id)
+        if not info:
+            self.logger.warning(f"{dev.name}: no entity mapped to state_id '{state_id}'")
+            return None, 0
+        try:
+            key = int(info.get("key", 0))
         except (TypeError, ValueError):
             key = 0
-        conn = self.connections.get(mac.split("-")[0], {})
+        if not key:
+            return None, 0
+        conn = self.connections.get(mac, {})
         client = conn.get("client")
         if not client:
-            self.logger.warning(f"{dev.name}: no active connection")
+            self.logger.warning(f"{dev.name}: no active connection to {mac}")
             return None, 0
         return client, key
 
+    # --- Action ConfigUI list callbacks (entity dropdowns) ---
+
+    def _list_entities_of_kind(self, dev_id, kind):
+        """Return [(state_id, display_name), ...] for the given device's
+        entities of the given kind. Used by action ConfigUI dropdowns."""
+        try:
+            dev = indigo.devices[int(dev_id)] if dev_id else None
+        except Exception:
+            return []
+        if dev is None:
+            return []
+        try:
+            em = json.loads(dev.pluginProps.get("entityKeyMap", "") or "{}")
+        except Exception:
+            return []
+        items = []
+        for sid, info in em.items():
+            if info.get("kind") != kind:
+                continue
+            label = info.get("name") or sid
+            items.append((sid, label))
+        items.sort(key=lambda x: x[1].lower())
+        return items
+
+    def getNumberEntities(self, filter, valuesDict, typeId, targetId):
+        return self._list_entities_of_kind(targetId, "number")
+
+    def getSelectEntities(self, filter, valuesDict, typeId, targetId):
+        return self._list_entities_of_kind(targetId, "select")
+
+    def getButtonEntities(self, filter, valuesDict, typeId, targetId):
+        return self._list_entities_of_kind(targetId, "button")
+
+    # --- Custom action callbacks ---
+
     def actionSetNumberValue(self, action, dev):
-        if dev.deviceTypeId != "esphomeNumber":
+        """Set a Number entity on this node device. The action's
+        entityStateId picks which Number entity to target."""
+        state_id = (action.props.get("entityStateId") or "").strip()
+        if not state_id:
+            self.logger.warning(f"{dev.name}: entityStateId not chosen in action config")
             return
-        client, key = self._client_for(dev)
+        client, key = self._client_and_key(dev, state_id)
         if not client:
             return
         try:
@@ -1117,18 +1666,28 @@ class Plugin(indigo.PluginBase):
         self.async_loop.call_soon_threadsafe(_do)
 
     def actionSetSelectOption(self, action, dev):
-        if dev.deviceTypeId != "esphomeSelect":
+        """Set a Select entity on this node device. entityStateId picks
+        which Select; option must be one of the entity's declared options."""
+        state_id = (action.props.get("entityStateId") or "").strip()
+        if not state_id:
+            self.logger.warning(f"{dev.name}: entityStateId not chosen in action config")
             return
-        client, key = self._client_for(dev)
+        client, key = self._client_and_key(dev, state_id)
         if not client:
             return
-        opt = action.props.get("option", "").strip()
+        opt = (action.props.get("option") or "").strip()
         if not opt:
             self.logger.warning(f"{dev.name}: select option not specified")
             return
-        valid = [o.strip() for o in (dev.pluginProps.get("options") or "").split(",")]
+        try:
+            em = json.loads(dev.pluginProps.get("entityKeyMap", "") or "{}")
+            valid = em.get(state_id, {}).get("options", [])
+        except Exception:
+            valid = []
         if valid and opt not in valid:
-            self.logger.warning(f"{dev.name}: '{opt}' not in available options ({', '.join(valid)})")
+            self.logger.warning(
+                f"{dev.name}: '{opt}' not in available options ({', '.join(valid)})"
+            )
             return
 
         def _do():
@@ -1140,11 +1699,12 @@ class Plugin(indigo.PluginBase):
         self.async_loop.call_soon_threadsafe(_do)
 
     def actionLockOpen(self, action, dev):
-        """OPEN command (latch-release) for locks that support it."""
+        """OPEN command (latch-release) for locks that support it.
+        Targets the device's primary lock entity."""
         if dev.deviceTypeId != "esphomeLock":
             return
         from aioesphomeapi import LockCommand
-        client, key = self._client_for(dev)
+        client, key = self._client_and_key(dev, "primary")
         if not client:
             return
 
@@ -1157,23 +1717,14 @@ class Plugin(indigo.PluginBase):
         self.async_loop.call_soon_threadsafe(_do)
 
     def actionPressButton(self, action, dev):
-        """Generic 'press an ESPHome Button entity' action, anchored on the
-        esphomeNode device. Caller supplies the button's entity key (numeric)."""
-        if dev.deviceTypeId != "esphomeNode":
+        """Press a Button entity on this node device. entityStateId picks
+        which button."""
+        state_id = (action.props.get("entityStateId") or "").strip()
+        if not state_id:
+            self.logger.warning(f"{dev.name}: entityStateId not chosen in action config")
             return
-        mac = dev.address
-        try:
-            key = int(action.props.get("entityKey", "0") or 0)
-        except (TypeError, ValueError):
-            self.logger.warning(f"{dev.name}: bad entity key for pressButton")
-            return
-        if not key:
-            self.logger.warning(f"{dev.name}: entity key required for pressButton")
-            return
-        conn = self.connections.get(mac, {})
-        client = conn.get("client")
+        client, key = self._client_and_key(dev, state_id)
         if not client:
-            self.logger.warning(f"{dev.name}: no active connection")
             return
 
         def _do():
@@ -1196,10 +1747,16 @@ class Plugin(indigo.PluginBase):
         if dev.deviceTypeId != "esphomeClimate":
             return
 
-        mac = dev.pluginProps.get("nodeMac", "")
+        # v0.4.0: primary entity key lives in entityKeyMap, node device's
+        # address is the MAC directly
+        mac = dev.address
         try:
-            key = int(dev.pluginProps.get("entityKey", "0"))
-        except (TypeError, ValueError):
+            em = json.loads(dev.pluginProps.get("entityKeyMap", "") or "{}")
+            key = int(em.get("primary", {}).get("key", 0))
+        except Exception:
+            self.logger.warning(f"{dev.name}: entityKeyMap missing/invalid")
+            return
+        if not key:
             return
         conn = self.connections.get(mac, {})
         client = conn.get("client")
@@ -1346,17 +1903,29 @@ class Plugin(indigo.PluginBase):
     # Device lifecycle
     # --------------------------------------------------------
 
-    def deviceStartComm(self, dev):
+    def getDeviceDisplayStateId(self, dev):
+        """v0.4.0: device list display column.
+
+        For info-only nodes (esphomeNode) we want the 'status' string
+        (Online/Disconnected/Bad key). For nodes with a primary control
+        entity (relay/dimmer/thermostat/etc.) Indigo's default native
+        state (onOffState, brightnessLevel, hvacOperationMode) is the
+        right pick — defer to PluginBase.
+        """
         if dev.deviceTypeId == "esphomeNode":
+            return "status"
+        return indigo.PluginBase.getDeviceDisplayStateId(self, dev)
+
+    def deviceStartComm(self, dev):
+        # v0.4.0: every device created by this plugin is now a node device
+        # (one per ESPHome node). entity_devices dict kept only for
+        # transitional compat with any code path that still references it.
+        if dev.deviceTypeId in self._OUR_DEVICE_TYPES:
             self.nodes_by_mac[dev.address] = dev
-        else:
-            self.entity_devices[dev.address] = dev
 
     def deviceStopComm(self, dev):
-        if dev.deviceTypeId == "esphomeNode":
+        if dev.deviceTypeId in self._OUR_DEVICE_TYPES:
             self.nodes_by_mac.pop(dev.address, None)
-        else:
-            self.entity_devices.pop(dev.address, None)
 
     # --------------------------------------------------------
     # PluginPrefs

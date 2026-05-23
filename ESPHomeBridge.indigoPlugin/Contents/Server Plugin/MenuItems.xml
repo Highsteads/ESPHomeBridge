@@ -36,6 +36,11 @@
         </ConfigUI>
     </MenuItem>
 
+    <MenuItem id="toggleTimestamps">
+        <Name>Toggle Timestamps in Log (on/off)</Name>
+        <CallbackMethod>menuToggleTimestamps</CallbackMethod>
+    </MenuItem>
+
     <MenuItem id="sep1" isSeparator="true"/>
 
     <MenuItem id="showPluginInfo">

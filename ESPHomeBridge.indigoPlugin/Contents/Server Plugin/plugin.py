@@ -5,8 +5,13 @@
 #              Auto-discovers via mDNS, connects per device via aioesphomeapi,
 #              maps each ESPHome entity to a native Indigo device.
 # Author:      CliveS & Claude Opus 4.7
-# Date:        20-05-2026
-# Version:     0.5.0
+# Date:        23-05-2026
+# Version:     0.5.1
+#
+# v0.5.1 (23-05-2026): Millisecond timestamp [HH:MM:SS.mmm] prefix on every
+# log line via plugin_utils.install_timestamp_filter() — matches Device
+# Activity Monitor convention. Module-level log() helper bumped to ms.
+# New "Toggle Timestamps in Log" menu item.
 
 try:
     import indigo
@@ -28,6 +33,10 @@ try:
     from plugin_utils import log_startup_banner
 except ImportError:
     log_startup_banner = None
+try:
+    from plugin_utils import install_timestamp_filter
+except ImportError:
+    install_timestamp_filter = None
 
 # aioesphomeapi + zeroconf are installed via requirements.txt into
 # Contents/Packages/ on plugin startup. They're imported lazily in the
@@ -40,7 +49,7 @@ except ImportError:
 # ============================================================
 
 PLUGIN_ID      = "com.clives.indigoplugin.esphomebridge"
-PLUGIN_VERSION = "0.5.0"
+PLUGIN_VERSION = "0.5.1"
 
 DEVICE_FOLDER_NAME = "ESPHome"
 
@@ -60,7 +69,7 @@ RECONNECT_BACKOFF_MAX     = 300
 # ============================================================
 
 def log(message, level="INFO"):
-    indigo.server.log(f"[{datetime.now().strftime('%H:%M:%S')}] {message}", level=level)
+    indigo.server.log(f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] {message}", level=level)
 
 
 def normalise_mac(raw):
@@ -93,6 +102,12 @@ class Plugin(indigo.PluginBase):
 
     def __init__(self, pluginId, pluginDisplayName, pluginVersion, pluginPrefs):
         super().__init__(pluginId, pluginDisplayName, pluginVersion, pluginPrefs)
+
+        self.timestamp_enabled = bool(pluginPrefs.get("timestampEnabled", True))
+        if install_timestamp_filter:
+            self._ts_filter = install_timestamp_filter(self, enabled=self.timestamp_enabled)
+        else:
+            self._ts_filter = None
 
         self.debug = pluginPrefs.get("logLevel", "INFO") == "DEBUG"
 
@@ -2110,16 +2125,28 @@ class Plugin(indigo.PluginBase):
             )
 
     def showPluginInfo(self, valuesDict=None, typeId=None):
+        connected = sum(1 for c in self.connections.values() if c.get("info"))
+        extras = [
+            ("Discovered:",        str(len(self.discovered))),
+            ("Connected:",         str(connected)),
+            ("Indigo nodes:",      str(len(self.nodes_by_mac))),
+            ("Indigo entities:",   str(len(self.entity_devices))),
+            ("Timestamps in Log:", "ON" if self.timestamp_enabled else "OFF"),
+        ]
         if log_startup_banner:
-            connected = sum(1 for c in self.connections.values() if c.get("info"))
-            log_startup_banner(self.pluginId, self.pluginDisplayName, self.pluginVersion, extras=[
-                ("Discovered:",  str(len(self.discovered))),
-                ("Connected:",   str(connected)),
-                ("Indigo nodes:", str(len(self.nodes_by_mac))),
-                ("Indigo entities:", str(len(self.entity_devices))),
-            ])
+            log_startup_banner(self.pluginId, self.pluginDisplayName, self.pluginVersion, extras=extras)
         else:
             indigo.server.log(f"{self.pluginDisplayName} v{self.pluginVersion}")
+            for label, value in extras:
+                indigo.server.log(f"  {label} {value}")
+
+    def menuToggleTimestamps(self):
+        self.timestamp_enabled = not self.timestamp_enabled
+        self.pluginPrefs["timestampEnabled"] = self.timestamp_enabled
+        if self._ts_filter:
+            self._ts_filter.enabled = self.timestamp_enabled
+        state = "ON" if self.timestamp_enabled else "OFF"
+        indigo.server.log(f"[{self.pluginDisplayName}] Timestamps in Log -> {state}")
 
     # --------------------------------------------------------
     # Device lifecycle

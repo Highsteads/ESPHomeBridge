@@ -135,15 +135,7 @@ class Plugin(indigo.PluginBase):
         self.auto_create_entities = bool(pluginPrefs.get("autoCreateEntities", True))
         self.default_encryption_key = pluginPrefs.get("defaultEncryptionKey", "") or ""
 
-        if log_startup_banner:
-            log_startup_banner(pluginId, pluginDisplayName, pluginVersion, extras=[
-                ("Discovery:",         "mDNS / _esphomelib._tcp"),
-                ("API port:",          str(DEFAULT_API_PORT)),
-                ("Auto-create nodes:", "yes" if self.auto_create_nodes else "no"),
-                ("Auto-create entities:", "yes" if self.auto_create_entities else "no"),
-            ])
-        else:
-            indigo.server.log(f"{pluginDisplayName} v{pluginVersion} starting")
+        # Startup banner moved to showPluginInfo on demand (revised 25-May-2026 per Jay).
 
     # --------------------------------------------------------
     # Lifecycle

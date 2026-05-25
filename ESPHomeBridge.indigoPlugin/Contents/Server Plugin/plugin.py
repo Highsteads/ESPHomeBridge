@@ -6,7 +6,7 @@
 #              maps each ESPHome entity to a native Indigo device.
 # Author:      CliveS & Claude Opus 4.7
 # Date:        23-05-2026
-# Version:     0.5.1
+# Version:     0.5.2
 #
 # v0.5.1 (23-05-2026): Millisecond timestamp [HH:MM:SS.mmm] prefix on every
 # log line via plugin_utils.install_timestamp_filter() — matches Device
@@ -49,7 +49,7 @@ except ImportError:
 # ============================================================
 
 PLUGIN_ID      = "com.clives.indigoplugin.esphomebridge"
-PLUGIN_VERSION = "0.5.1"
+PLUGIN_VERSION = "0.5.2"
 
 DEVICE_FOLDER_NAME = "ESPHome"
 
@@ -2175,6 +2175,19 @@ class Plugin(indigo.PluginBase):
     def deviceStopComm(self, dev):
         if dev.deviceTypeId in self._OUR_DEVICE_TYPES:
             self.nodes_by_mac.pop(dev.address, None)
+
+    @staticmethod
+    def didDeviceCommPropertyChange(oldDevice, newDevice):
+        """Restart comm only when the ESPHome connection params change.
+
+        `address` is the MAC (Indigo's device address — node identity);
+        `hostname`/`ip`/`port` define where to connect; `encryptionKey` is
+        required by the Native API. Other props (boardModel, esphomeVersion,
+        deviceClass, speedLevels, visualMin/Max, supportedModes) are
+        informational and don't justify a restart.
+        """
+        keys = ("address", "hostname", "ip", "port", "encryptionKey")
+        return any(oldDevice.pluginProps.get(k) != newDevice.pluginProps.get(k) for k in keys)
 
     # --------------------------------------------------------
     # PluginPrefs

@@ -5,8 +5,8 @@
 #              Auto-discovers via mDNS, connects per device via aioesphomeapi,
 #              maps each ESPHome entity to a native Indigo device.
 # Author:      CliveS & Claude Opus 4.7
-# Date:        23-05-2026
-# Version:     0.5.2
+# Date:        29-05-2026
+# Version:     0.5.3
 #
 # v0.5.1 (23-05-2026): Millisecond timestamp [HH:MM:SS.mmm] prefix on every
 # log line via plugin_utils.install_timestamp_filter() — matches Device
@@ -49,7 +49,7 @@ except ImportError:
 # ============================================================
 
 PLUGIN_ID      = "com.clives.indigoplugin.esphomebridge"
-PLUGIN_VERSION = "0.5.2"
+PLUGIN_VERSION = "0.5.3"
 
 DEVICE_FOLDER_NAME = "ESPHome"
 
@@ -706,12 +706,23 @@ class Plugin(indigo.PluginBase):
                 # 'Connection requires encryption' = device has API encryption
                 # set but we have no key for it. Give up rather than spam logs.
                 if "requires encryption" in msg or ("encryption" in msg and "wrong" in msg):
-                    self.logger.error(
-                        f"{mac}: {exc}. No usable encryption key. Set one in the "
-                        "device's Configure dialog and restart the plugin. "
-                        "Plugin will not retry until then."
-                    )
-                    self._update_node_status(mac, connected=False, status="Needs encryption key")
+                    if node_dev:
+                        # Configured Indigo device without a usable key — actionable.
+                        self.logger.error(
+                            f"{mac}: {exc}. No usable encryption key. Set one in the "
+                            "device's Configure dialog and restart the plugin. "
+                            "Plugin will not retry until then."
+                        )
+                        self._update_node_status(mac, connected=False, status="Needs encryption key")
+                    else:
+                        # Discovered on the network but not set up in Indigo — an
+                        # expected state, not an error (see 'not configured is INFO
+                        # not ERROR'). Log at INFO so the event log stays clean.
+                        self.logger.info(
+                            f"{mac} at {d['ip']}: encrypted ESPHome device not set up "
+                            "in Indigo — add it and set its API encryption key to use it. "
+                            "Ignoring until then."
+                        )
                     return
                 self.logger.warning(f"{mac}: connection error: {exc}; reconnect in {backoff}s")
             except asyncio.CancelledError:

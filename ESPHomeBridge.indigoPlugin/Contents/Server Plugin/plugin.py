@@ -830,8 +830,7 @@ class Plugin(indigo.PluginBase):
         """
         from aioesphomeapi import (
             SwitchState, SensorState, BinarySensorState, LightState,
-            TextSensorState, FanState, CoverState, ClimateState,
-            LockEntityState, NumberState, SelectState,
+            TextSensorState, FanState, CoverState, LockEntityState, NumberState, SelectState,
         )
         if state_id == "primary":
             # Delegate to legacy handler — its writes target the native
@@ -841,7 +840,6 @@ class Plugin(indigo.PluginBase):
             return
 
         # Secondary entity — write to the dynamic state.
-        kind = info.get("kind", "sensor")
         if isinstance(state, SensorState):
             if getattr(state, "missing_state", False):
                 return

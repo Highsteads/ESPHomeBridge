@@ -15,3 +15,6 @@ CLAUDE.md
 # The captive-portal variants in this folder are safe to commit; only
 # the named-credentials variants need to stay off GitHub.
 test-fixtures/esp-dining-room-rgb-rig.yaml
+
+# Test runner artefacts
+.pytest_cache/

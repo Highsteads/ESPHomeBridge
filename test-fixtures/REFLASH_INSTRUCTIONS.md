@@ -1,6 +1,6 @@
 # Reflashing the ESP32 BLE proxy for ESPHomeBridge testing
 
-The BLE proxy at `192.168.100.242` (MAC `FCB4674EAEC8`) currently uses an
+The BLE proxy at `<ble-proxy-ip>` (MAC `<its-mac-address>`) currently uses an
 unrecoverable API encryption key from the decommissioned HA install. To
 make it a fully testable target for ESPHomeBridge, reflash it with
 `esp32-test-rig.yaml` (the file next to this one). That config exposes
@@ -48,7 +48,7 @@ esphome upload esp32-test-rig.yaml --device /dev/cu.usbserial-XXX
 The first flash needs USB. Subsequent updates can use OTA:
 
 ```bash
-esphome upload esp32-test-rig.yaml --device 192.168.100.242
+esphome upload esp32-test-rig.yaml --device <ble-proxy-ip>
 ```
 
 (OTA password is `indigotestrig` per the YAML.)

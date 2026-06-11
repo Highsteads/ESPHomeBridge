@@ -540,8 +540,8 @@ To turn the prefix off (or back on) at any time:
 The setting is stored in `pluginPrefs` (`timestampEnabled`) and persists across
 restarts. Defaults to ON.
 
----
+## Authors & licence
 
-## License
+Vibed into existence by **CliveS**, who knew what he wanted, argued until he got it, and tested it on a real house. Typed at inhuman speed by **Claude** (Anthropic), who mostly did as it was told.
 
-MIT. See `LICENSE` (forthcoming — pending v1.0).
+© 2026 CliveS · [MIT licence](LICENSE) — copy it, fork it, bend it, break it, fix it, ship it. If it breaks, you get to keep both pieces.

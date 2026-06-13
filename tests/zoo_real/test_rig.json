@@ -1,0 +1,17 @@
+{
+  "deviceTypeId": "esphomeSwitch",
+  "entity_kinds": [
+    "switch",
+    "binary",
+    "binary",
+    "cover",
+    "fan",
+    "light",
+    "light",
+    "sensor",
+    "sensor",
+    "sensor",
+    "button",
+    "text"
+  ]
+}

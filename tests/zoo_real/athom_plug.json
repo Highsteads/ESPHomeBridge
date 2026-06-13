@@ -1,0 +1,27 @@
+{
+  "deviceTypeId": "esphomeLight",
+  "entity_kinds": [
+    "light",
+    "binary",
+    "binary",
+    "sensor",
+    "sensor",
+    "sensor",
+    "sensor",
+    "sensor",
+    "sensor",
+    "sensor",
+    "sensor",
+    "sensor",
+    "sensor",
+    "sensor",
+    "button",
+    "button",
+    "button",
+    "text",
+    "text",
+    "text",
+    "text",
+    "text"
+  ]
+}

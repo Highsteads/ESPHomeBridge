@@ -1,0 +1,14 @@
+{
+  "deviceTypeId": "esphomeLock",
+  "entity_kinds": [
+    "lock",
+    "sensor",
+    "sensor",
+    "sensor",
+    "button",
+    "button",
+    "button",
+    "number",
+    "select"
+  ]
+}

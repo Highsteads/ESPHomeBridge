@@ -1,0 +1,9 @@
+{
+  "deviceTypeId": "esphomeClimate",
+  "entity_kinds": [
+    "climate",
+    "sensor",
+    "sensor",
+    "sensor"
+  ]
+}

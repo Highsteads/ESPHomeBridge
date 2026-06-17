@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 # kind string -> aioesphomeapi EntityInfo class name. Built into objects in
 # test_zoo (importing aioesphomeapi there keeps the manifest import-light).

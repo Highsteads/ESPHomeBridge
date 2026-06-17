@@ -4,9 +4,22 @@
 # Description: Indigo bridge for ESPHome devices via the Native API (port 6053).
 #              Auto-discovers via mDNS, connects per device via aioesphomeapi,
 #              maps each ESPHome entity to a native Indigo device.
-# Author:      CliveS & Claude Opus 4.7
-# Date:        29-05-2026
-# Version:     0.5.3
+# Author:      CliveS & Claude Opus 4.8
+# Date:        17-06-2026
+# Version:     0.6.0
+#
+# v0.6.0 (17-06-2026): SENSOR NODES + intent-aware classification. The node-type
+# classifier no longer lets a status-LED Light hijack the device type: a Light is
+# demoted from "primary" when it's flagged config/diagnostic OR the node carries
+# power/energy sensors (i.e. it's a meter, and the light is the plug's status LED).
+# A node with no genuine control but with sensors is now created as a new
+# esphomeSensor (type="sensor") device whose headline reading — chosen by
+# device_class priority (power > energy > temperature > …) — drives the native
+# sensorValue; all other entities remain custom states. Fixes relay-less Athom
+# power-monitor plugs that were being created as dimmers. Switchable plugs (Switch
+# present) and real lamps are unaffected. Migration of mis-typed nodes is automatic
+# via the existing recreate-on-type-change path. (Manual type override is a planned
+# follow-up.) plugin.py header version was lagging at 0.5.3; now aligned.
 #
 # v0.5.1 (23-05-2026): Millisecond timestamp [HH:MM:SS.mmm] prefix on every
 # log line via plugin_utils.install_timestamp_filter() — matches Device
@@ -49,7 +62,7 @@ except ImportError:
 # ============================================================
 
 PLUGIN_ID      = "com.clives.indigoplugin.esphomebridge"
-PLUGIN_VERSION = "0.5.3"
+PLUGIN_VERSION = "0.6.0"
 
 DEVICE_FOLDER_NAME = "ESPHome"
 
@@ -92,6 +105,77 @@ def snake_to_camel(snake):
     if not parts:
         return ""
     return parts[0].lower() + "".join(p.capitalize() for p in parts[1:] if p)
+
+
+# ESPHome sensor device_classes that mark a node as a METER rather than a
+# controllable device. When a node carries any of these AND its only "control"
+# is a status LED, the node is classified as an esphomeSensor — not a light.
+# (Fixes relay-less power-monitor plugs being mistaken for dimmers.)
+METERING_DEVICE_CLASSES = {
+    "power", "energy", "apparent_power", "reactive_power",
+    "current", "voltage", "power_factor", "frequency",
+}
+
+# device_class priority for choosing a sensor node's HEADLINE value — the one
+# routed to the native Indigo sensorValue. First match wins.
+HEADLINE_DEVICE_CLASS_PRIORITY = [
+    "power", "energy", "temperature", "humidity", "illuminance",
+    "pressure", "carbon_dioxide", "voltage", "current",
+    "battery", "signal_strength",
+]
+
+
+def _entity_category_int(entity):
+    """ESPHome EntityCategory as an int: 0=NONE, 1=CONFIG, 2=DIAGNOSTIC."""
+    try:
+        return int(getattr(entity, "entity_category", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def node_has_metering(entities):
+    """True if the node exposes a power/energy-style sensor — i.e. it's a meter."""
+    from aioesphomeapi import SensorInfo
+    for e in entities:
+        if isinstance(e, SensorInfo) and \
+           (getattr(e, "device_class", "") or "").lower() in METERING_DEVICE_CLASSES:
+            return True
+    return False
+
+
+def light_is_status_only(light, entities):
+    """A Light should not be a node's PRIMARY device type when it's plainly a
+    status indicator rather than a controllable lamp:
+      - it's flagged CONFIG/DIAGNOSTIC, or
+      - the node is a power meter (power/energy sensors present) — then the
+        light is the plug's status LED and the node's purpose is metering.
+    Genuinely metered smart lamps (rare) are handled by a manual override."""
+    if _entity_category_int(light) != 0:
+        return True
+    return node_has_metering(entities)
+
+
+def pick_headline_sensor(entities):
+    """Choose the sensor whose value becomes a sensor-node's native sensorValue.
+    Prefers a meaningful device_class (power, temperature, …), skips diagnostic
+    sensors, then falls back to the first sensor with a unit, then the first
+    sensor. Returns the SensorInfo, or None if the node has no numeric sensor."""
+    from aioesphomeapi import SensorInfo
+    all_sensors = [e for e in entities if isinstance(e, SensorInfo)]
+    if not all_sensors:
+        return None
+    sensors = [e for e in all_sensors if _entity_category_int(e) == 0] or all_sensors
+    by_class = {}
+    for e in sensors:
+        dc = (getattr(e, "device_class", "") or "").lower()
+        by_class.setdefault(dc, e)
+    for dc in HEADLINE_DEVICE_CLASS_PRIORITY:
+        if dc in by_class:
+            return by_class[dc]
+    for e in sensors:
+        if getattr(e, "unit_of_measurement", "") or "":
+            return e
+    return sensors[0]
 
 
 # ============================================================
@@ -260,8 +344,8 @@ class Plugin(indigo.PluginBase):
     ]
 
     _OUR_DEVICE_TYPES = {
-        "esphomeNode", "esphomeSwitch", "esphomeLight", "esphomeFan",
-        "esphomeCover", "esphomeClimate", "esphomeLock",
+        "esphomeNode", "esphomeSensor", "esphomeSwitch", "esphomeLight",
+        "esphomeFan", "esphomeCover", "esphomeClimate", "esphomeLock",
     }
 
     def _to_state_id(self, name):
@@ -310,9 +394,16 @@ class Plugin(indigo.PluginBase):
         return " ".join(parts)
 
     def _classify_node_type(self, entities):
-        """Pick the Indigo deviceTypeId for a node based on its entities.
+        """Pick the Indigo deviceTypeId for a node from its entities.
 
         Returns (type_id, primary_entity_or_None).
+
+        A genuine control wins by priority (Lock > Climate > Switch > Light >
+        Fan > Cover) — EXCEPT a status-LED Light is demoted (see
+        light_is_status_only) so a relay-less power-monitor plug isn't taken
+        for a dimmer. With no genuine control, a node with numeric sensors
+        becomes an esphomeSensor (its headline value drives the native
+        sensorValue); otherwise a plain info esphomeNode.
         """
         from aioesphomeapi import (
             SwitchInfo, LightInfo, FanInfo, CoverInfo,
@@ -330,7 +421,12 @@ class Plugin(indigo.PluginBase):
             cls = type_class_map[cls_name]
             for e in entities:
                 if isinstance(e, cls):
+                    if cls is LightInfo and light_is_status_only(e, entities):
+                        continue   # status LED — not the node's purpose
                     return type_id, e
+        headline = pick_headline_sensor(entities)
+        if headline is not None:
+            return "esphomeSensor", headline
         return "esphomeNode", None
 
     def _build_entity_key_map(self, entities, primary_entity):
@@ -833,9 +929,13 @@ class Plugin(indigo.PluginBase):
             TextSensorState, FanState, CoverState, LockEntityState, NumberState, SelectState,
         )
         if state_id == "primary":
-            # Delegate to legacy handler — its writes target the native
-            # Indigo states (onOffState, brightnessLevel, hvacOperationMode)
-            # which is exactly what we want for the primary entity.
+            # A sensor node routes its headline reading into the native
+            # sensorValue (with unit in the .ui). Every other node type
+            # delegates to the legacy handler, whose writes target the right
+            # native states (onOffState, brightnessLevel, hvacOperationMode…).
+            if dev.deviceTypeId == "esphomeSensor":
+                self._apply_sensor_headline(dev, state, info)
+                return
             self._apply_state_to_device(dev, state)
             return
 
@@ -905,6 +1005,39 @@ class Plugin(indigo.PluginBase):
             except (TypeError, ValueError):
                 lock_int = 0
             dev.updateStateOnServer(state_id, lock_int in (1, 4, 5))  # LOCKED-ish
+
+    def _apply_sensor_headline(self, dev, state, info):
+        """Write a sensor node's primary (headline) reading into the native
+        Indigo sensorValue, rounded, with the unit shown in the .ui suffix."""
+        from aioesphomeapi import SensorState, TextSensorState
+        if isinstance(state, SensorState):
+            if getattr(state, "missing_state", False):
+                return
+            try:
+                raw = float(state.state)
+            except (TypeError, ValueError):
+                return
+            unit = (info or {}).get("unit", "")
+            if math.isnan(raw):
+                val, ui = raw, "nan"
+            elif unit == "s":
+                val = int(round(raw))
+                ui  = self._format_seconds(val)
+            else:
+                val = round(raw, 2)
+                ui  = f"{val:.2f} {unit}".rstrip() if unit else f"{val:.2f}"
+            try:
+                dev.updateStateOnServer("sensorValue", val, uiValue=ui)
+            except Exception as exc:
+                self.logger.debug(f"sensorValue write failed on {dev.name}: {exc}")
+        elif isinstance(state, TextSensorState):
+            # A text headline can't be a numeric sensorValue — surface it in the .ui.
+            if getattr(state, "missing_state", False):
+                return
+            try:
+                dev.updateStateOnServer("sensorValue", 0, uiValue=str(state.state))
+            except Exception:
+                pass
 
     def _apply_state_to_device(self, dev, state):
         """Translate an ESPHome state object into Indigo state writes."""
@@ -1257,6 +1390,15 @@ class Plugin(indigo.PluginBase):
         controls in Indigo's UI work natively."""
         if primary_entity is None:
             return {}
+        if type_id == "esphomeSensor":
+            # Sensor-class node: the native sensorValue must exist, so set
+            # SupportsSensorValue in props at creation (hidden XML defaults are
+            # NOT applied by indigo.device.create — reserved-state gotcha).
+            return {
+                "SupportsSensorValue": True,
+                "SupportsOnState":     False,
+                "unit": getattr(primary_entity, "unit_of_measurement", "") or "",
+            }
         from aioesphomeapi import (
             LightInfo, FanInfo, CoverInfo, ClimateInfo, LockInfo,
         )

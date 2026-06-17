@@ -70,6 +70,51 @@
     </Device>
 
     <!-- ============================================================
+         esphomeSensor - sensor-class node (no controllable primary, but has
+         sensors — e.g. a relay-less power-monitor plug). The headline reading
+         (chosen by device_class priority) drives the native sensorValue; all
+         other entities are custom states. SupportsSensorValue is set in props
+         at creation (hidden XML defaults are NOT applied by device.create), so
+         do NOT declare a <State id="sensorValue"> here — it is native.
+         ============================================================ -->
+    <Device type="sensor" id="esphomeSensor">
+        <Name>ESPHome Sensor Node</Name>
+        <ConfigUI>
+            <Field id="address" type="textfield" defaultValue=""><Label>MAC Address:</Label></Field>
+            <Field id="hostname" type="textfield" defaultValue=""><Label>Hostname:</Label></Field>
+            <Field id="ip" type="textfield" defaultValue=""><Label>IP Address:</Label></Field>
+            <Field id="port" type="textfield" defaultValue="6053"><Label>API Port:</Label></Field>
+            <Field id="encryptionKey" type="textfield" defaultValue="">
+                <Label>API Encryption Key (Base64):</Label>
+                <Description>From the device's YAML api: encryption: key: line. Leave blank for unencrypted API.</Description>
+            </Field>
+            <Field id="boardModel" type="textfield" readonly="true" defaultValue=""><Label>Board:</Label></Field>
+            <Field id="esphomeVersion" type="textfield" readonly="true" defaultValue=""><Label>ESPHome Version:</Label></Field>
+            <Field id="unit" type="textfield" readonly="true" defaultValue=""><Label>Headline Unit:</Label></Field>
+            <Field id="SupportsSensorValue" type="checkbox" hidden="true" defaultValue="true"/>
+            <Field id="SupportsOnState" type="checkbox" hidden="true" defaultValue="false"/>
+            <Field id="entityKeyMap" type="textfield" hidden="true" defaultValue=""/>
+        </ConfigUI>
+        <States>
+            <State id="connected">
+                <ValueType>Boolean</ValueType>
+                <TriggerLabel>Connected Changed</TriggerLabel>
+                <ControlPageLabel>Connected</ControlPageLabel>
+            </State>
+            <State id="status">
+                <ValueType>String</ValueType>
+                <TriggerLabel>Status Changed</TriggerLabel>
+                <ControlPageLabel>Status</ControlPageLabel>
+            </State>
+            <State id="lastSeen">
+                <ValueType>String</ValueType>
+                <TriggerLabel>Last Seen Changed</TriggerLabel>
+                <ControlPageLabel>Last Seen</ControlPageLabel>
+            </State>
+        </States>
+    </Device>
+
+    <!-- ============================================================
          esphomeSwitch - relay-class node (primary entity = Switch)
          ============================================================ -->
     <Device type="relay" id="esphomeSwitch">

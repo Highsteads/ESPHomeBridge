@@ -5,8 +5,22 @@
 #              Auto-discovers via mDNS, connects per device via aioesphomeapi,
 #              maps each ESPHome entity to a native Indigo device.
 # Author:      CliveS & Claude Opus 4.8
-# Date:        17-06-2026
-# Version:     0.6.0
+# Date:        21-07-2026
+# Version:     0.7.0
+#
+# v0.7.0 (21-07-2026): DEEP REVIEW batch. Dynamic state IDs can no longer
+# collide with the states declared in Devices.xml, with the plugin's own node-info
+# states, or with Indigo's reserved native names (a "Battery Level" sensor now maps
+# to `battery`, not the reserved `batteryLevel`). NaN / infinity readings are
+# dropped instead of being written into a Number state. The v0.4.0 migration only
+# deletes genuinely legacy devices, so a lost preferences flush can't wipe a
+# working set. Checkbox preferences are read through a real boolean coercion
+# ("false" used to read as True). esphomeSensor devices answer Indigo's status
+# request. The Device Came Online / Went Offline events actually fire. mDNS
+# discovery retries if zeroconf fails to start, discovery callbacks log their own
+# exceptions, and connection tasks are held so the garbage collector can't cancel
+# them. The default encryption key is read from IndigoSecrets.py first. Log level
+# set in Configure now takes effect. Dead v0.3.x code removed.
 #
 # v0.6.0 (17-06-2026): SENSOR NODES + intent-aware classification. The node-type
 # classifier no longer lets a status-LED Light hijack the device type: a Light is
@@ -51,6 +65,14 @@ try:
 except ImportError:
     install_timestamp_filter = None
 
+# Secrets policy: credentials come from IndigoSecrets.py first, PluginConfig
+# second. Per-key try/except so a missing key can't blank the others.
+sys.path.insert(0, "/Library/Application Support/Perceptive Automation")
+try:
+    from IndigoSecrets import ESPHOME_DEFAULT_ENCRYPTION_KEY
+except ImportError:
+    ESPHOME_DEFAULT_ENCRYPTION_KEY = ""
+
 # aioesphomeapi + zeroconf are installed via requirements.txt into
 # Contents/Packages/ on plugin startup. They're imported lazily in the
 # async-thread setup so import errors get logged through self.logger
@@ -62,7 +84,7 @@ except ImportError:
 # ============================================================
 
 PLUGIN_ID      = "com.clives.indigoplugin.esphomebridge"
-PLUGIN_VERSION = "0.6.0"
+PLUGIN_VERSION = "0.7.0"
 
 DEVICE_FOLDER_NAME = "ESPHome"
 
@@ -75,6 +97,17 @@ DEFAULT_API_PORT = 6053
 # Connection backoff
 RECONNECT_BACKOFF_INITIAL = 5    # seconds
 RECONNECT_BACKOFF_MAX     = 300
+
+# Adaptive retry tiers. Not everything advertising _esphomelib._tcp is an
+# ESPHome node — a SMLIGHT SMHUB Zigbee coordinator borrows the same service
+# type, opens port 6053 and then never answers the handshake. Left alone the
+# plugin retried forever and warned every 35 seconds about hardware the user
+# had never adopted. So: warn once, retry quietly with back-off, then park.
+MAX_CONNECT_FAILURES_ADOPTED   = 10   # a node the user HAS added to Indigo
+MAX_CONNECT_FAILURES_UNADOPTED = 3    # merely discovered — likely not ours at all
+# How long a parked node is left alone before one more attempt. Adding it as an
+# Indigo device un-parks it immediately (see deviceStartComm).
+PARKED_RETRY_AFTER = 3600         # seconds
 
 
 # ============================================================
@@ -108,6 +141,26 @@ def log(message, level="INFO"):
     indigo.server.log(f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] {message}", level=_lvl(level))
 
 
+def as_bool(value, default=False):
+    """Coerce a pluginPrefs / pluginProps value to a real bool.
+
+    Indigo re-serialises a saved dialog's checkbox as the STRING "false", and
+    bool("false") is True — so every checkbox read has to go through this.
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in ("true", "yes", "on", "1"):
+        return True
+    if text in ("false", "no", "off", "0", ""):
+        return False
+    return default
+
+
 def normalise_mac(raw):
     """Convert any MAC representation to 12-char uppercase hex with no separators."""
     if not raw:
@@ -122,12 +175,33 @@ def is_valid_state_id(key):
     return all(c.isascii() and c.isalnum() for c in key)
 
 
-def snake_to_camel(snake):
-    """tasmota_field_name or Tasmota-name -> tasmotaFieldName for Indigo state IDs."""
-    parts = (snake or "").replace("-", "_").split("_")
-    if not parts:
-        return ""
-    return parts[0].lower() + "".join(p.capitalize() for p in parts[1:] if p)
+# State IDs a dynamic entity state must never take. Two groups:
+#   * declared — every state declared in Devices.xml across our device types.
+#     A firmware entity called "Status" would otherwise land on top of the
+#     connection status the plugin writes.
+#   * native — Indigo's own reserved property names. Writes to these are
+#     silently routed to the native property and never appear as custom states.
+# The four node-info states (ipAddress, macAddress, boardModel, esphomeVersion)
+# are deliberately NOT reserved — a firmware entity of the same name is welcome
+# to own them, and _write_node_info_states stands aside when one does.
+DECLARED_STATE_IDS = {
+    "connected", "status", "lastSeen", "colorTemp", "oscillating", "direction",
+    "currentOperation", "action", "preset", "lockState",
+}
+
+RESERVED_NATIVE_STATE_IDS = {
+    "batteryLevel", "onOffState", "sensorValue", "brightnessLevel",
+    "hvacOperationMode", "temperatureInput1", "setpointHeat", "setpointCool",
+    "redLevel", "greenLevel", "blueLevel", "whiteLevel",
+}
+
+# Preferred substitutes for reserved names, so the obvious sensor still lands
+# somewhere sensible rather than being suffixed into "batteryLevel2".
+RESERVED_STATE_ID_REMAP = {
+    "batteryLevel": "battery",
+    "sensorValue":  "reading",
+    "onOffState":   "onOff",
+}
 
 
 # ESPHome sensor device_classes that mark a node as a METER rather than a
@@ -210,13 +284,13 @@ class Plugin(indigo.PluginBase):
     def __init__(self, pluginId, pluginDisplayName, pluginVersion, pluginPrefs):
         super().__init__(pluginId, pluginDisplayName, pluginVersion, pluginPrefs)
 
-        self.timestamp_enabled = bool(pluginPrefs.get("timestampEnabled", True))
+        self.timestamp_enabled = as_bool(pluginPrefs.get("timestampEnabled", True), True)
         if install_timestamp_filter:
             self._ts_filter = install_timestamp_filter(self, enabled=self.timestamp_enabled)
         else:
             self._ts_filter = None
 
-        self.debug = pluginPrefs.get("logLevel", "INFO") == "DEBUG"
+        self._apply_log_level(pluginPrefs.get("logLevel", "INFO"))
 
         # Discovery cache: mac -> {hostname, ip, port, name, first_seen}
         self.discovered = {}
@@ -224,10 +298,8 @@ class Plugin(indigo.PluginBase):
         # Per-device connection state: mac -> {client, task, info, entities:{key:info}}
         self.connections = {}
 
-        # Indigo device cache: mac -> indigo.Device for the esphomeNode
-        # Entity devices keyed by f"{mac}_{entity_key}"
+        # Indigo device cache: mac -> indigo.Device for the node device
         self.nodes_by_mac = {}
-        self.entity_devices = {}    # {f"{mac}_{key}": indigo.Device}
 
         # Event triggers
         self.event_triggers = {}
@@ -237,12 +309,46 @@ class Plugin(indigo.PluginBase):
         self.async_thread = None
         self.async_started = threading.Event()
 
+        # Strong references to the per-device connection tasks. asyncio only
+        # holds a weak reference, so a task nobody keeps can be collected
+        # mid-flight and the connection silently disappears.
+        self._connect_tasks = set()
+
+        # Nodes we've stopped retrying: mac -> {"reason", "since", "failures"}
+        self.parked = {}
+
         # Config
-        self.auto_create_nodes    = bool(pluginPrefs.get("autoCreateDevices", True))
-        self.auto_create_entities = bool(pluginPrefs.get("autoCreateEntities", True))
-        self.default_encryption_key = pluginPrefs.get("defaultEncryptionKey", "") or ""
+        self.auto_create_nodes = as_bool(pluginPrefs.get("autoCreateDevices", True), True)
+        self.default_encryption_key = self._resolve_default_key(pluginPrefs)
 
         # Startup banner moved to showPluginInfo on demand (revised 25-May-2026 per Jay).
+
+    def _resolve_default_key(self, prefs):
+        """Default API encryption key: IndigoSecrets.py first, PluginConfig second."""
+        key = (ESPHOME_DEFAULT_ENCRYPTION_KEY or "").strip()
+        if key:
+            return key
+        return (prefs.get("defaultEncryptionKey", "") or "").strip()
+
+    def _apply_log_level(self, level_name):
+        """Apply the Configure dialog's Log Level to the Indigo log handler.
+
+        Without this the setting was stored and ignored — debug lines never
+        reached the event log whatever the user picked.
+        """
+        level = _lvl(level_name or "INFO")
+        handler = getattr(self, "indigo_log_handler", None)
+        if handler is not None:
+            try:
+                handler.setLevel(level)
+            except Exception:
+                pass
+        logger = getattr(self, "logger", None)
+        if logger is not None:
+            try:
+                logger.setLevel(min(level, logging.INFO))
+            except Exception:
+                pass
 
     # --------------------------------------------------------
     # Lifecycle
@@ -304,7 +410,7 @@ class Plugin(indigo.PluginBase):
           3. Mark migration complete in pluginPrefs.migrated_v040 so we
              never run again.
         """
-        if self.pluginPrefs.get("migrated_v040", False):
+        if as_bool(self.pluginPrefs.get("migrated_v040", False)):
             return
         saved_keys = {}
         ids_to_delete = []
@@ -314,7 +420,8 @@ class Plugin(indigo.PluginBase):
                 key = (dev.pluginProps.get("encryptionKey", "") or "").strip()
                 if key:
                     saved_keys[dev.address] = key
-            ids_to_delete.append((dev.id, dev.name))
+            if self._is_legacy_device(dev):
+                ids_to_delete.append((dev.id, dev.name))
         try:
             self.pluginPrefs["migration_v040_saved_keys"] = json.dumps(saved_keys)
         except Exception as exc:
@@ -327,11 +434,31 @@ class Plugin(indigo.PluginBase):
             except Exception as exc:
                 self.logger.warning(f"failed to delete legacy device {name} (id={dev_id}): {exc}")
         self.pluginPrefs["migrated_v040"] = True
-        self.logger.warning(
-            f"=== v0.4.0 migration: deleted {deleted} legacy device(s); "
-            f"preserved {len(saved_keys)} encryption key(s). "
-            "New one-per-node devices will be created on next mDNS discovery. ==="
-        )
+        if deleted:
+            self.logger.warning(
+                f"=== v0.4.0 migration: deleted {deleted} legacy device(s); "
+                f"preserved {len(saved_keys)} encryption key(s). "
+                "New one-per-node devices will be created on next mDNS discovery. ==="
+            )
+
+    # Device types only the pre-v0.4.0 one-device-per-entity model ever created.
+    _LEGACY_ONLY_TYPES = {
+        "esphomeBinarySensor", "esphomeNumber", "esphomeSelect", "esphomeText",
+    }
+
+    def _is_legacy_device(self, dev):
+        """True only for a device built by the pre-v0.4.0 one-per-entity model.
+
+        The migration flag lives in pluginPrefs, and preferences are only
+        flushed to disk on a graceful shutdown — so a crash could lose it and
+        run the migration a second time. Deleting only genuinely legacy devices
+        makes that replay harmless instead of wiping a working device set.
+        """
+        if dev.deviceTypeId in self._LEGACY_ONLY_TYPES:
+            return True
+        # Legacy entity devices used a compound "<mac>_<entitykey>" address;
+        # the v0.4.0 model addresses a node by its bare MAC.
+        return "_" in (dev.address or "")
 
     # ========== v0.4.0 helpers: classify + map entities to states ==========
 
@@ -393,6 +520,25 @@ class Plugin(indigo.PluginBase):
         if not out or not out[0].isalpha():
             out = "x" + out
         return out
+
+    def _allocate_state_id(self, base, used_ids, needs_level=False):
+        """Pick a free state ID for an entity.
+
+        Reserved native names get a sensible substitute first (a "Battery Level"
+        sensor becomes `battery`, never the reserved `batteryLevel`), then any
+        remaining clash is settled with a numeric suffix.
+        """
+        candidate = base
+        if candidate in RESERVED_NATIVE_STATE_IDS:
+            remapped = RESERVED_STATE_ID_REMAP.get(candidate)
+            if remapped and remapped not in used_ids and \
+               not (needs_level and remapped + "Level" in used_ids):
+                return remapped
+        n = 2
+        while candidate in used_ids or (needs_level and candidate + "Level" in used_ids):
+            candidate = f"{base}{n}"
+            n += 1
+        return candidate
 
     def _format_seconds(self, secs):
         """Format an integer seconds value as 'Xd Xh Xm Xs', matching the
@@ -486,7 +632,10 @@ class Plugin(indigo.PluginBase):
         ]
         primary_key = getattr(primary_entity, "key", None) if primary_entity else None
         out = {}
-        used_ids = set()
+        # Seed the taken set with everything a dynamic state must not shadow:
+        # the states declared in Devices.xml and Indigo's reserved native
+        # property names.
+        used_ids = set(DECLARED_STATE_IDS) | set(RESERVED_NATIVE_STATE_IDS)
         # The primary entity gets state_id="primary" — actions look it up here.
         if primary_entity is not None:
             kind = "node"
@@ -514,12 +663,14 @@ class Plugin(indigo.PluginBase):
             base = self._to_state_id(e.name or e.object_id or "")
             if not base:
                 continue
-            state_id = base
-            n = 2
-            while state_id in used_ids:
-                state_id = f"{base}{n}"
-                n += 1
+            # A secondary light / fan / cover also claims "<id>Level", so that
+            # name has to be taken at the same time or a later "Foo Level"
+            # sensor would quietly overwrite it.
+            needs_level = kind in ("light", "fan", "cover")
+            state_id = self._allocate_state_id(base, used_ids, needs_level)
             used_ids.add(state_id)
+            if needs_level:
+                used_ids.add(state_id + "Level")
             info = {
                 "key":  int(e.key),
                 "kind": kind,
@@ -612,17 +763,59 @@ class Plugin(indigo.PluginBase):
     # --------------------------------------------------------
 
     async def _async_main(self):
-        """Main async entry point. Starts mDNS browsing and runs forever."""
+        """Main async entry point. Starts mDNS browsing and runs forever.
+
+        The browser start is retried with back-off: zeroconf can fail on a
+        network that isn't up yet, and a single failure used to leave the
+        plugin alive but permanently blind.
+        """
+        backoff = RECONNECT_BACKOFF_INITIAL
         try:
-            await self._start_mdns_browser()
-            # Main loop just sleeps; work happens via mDNS callbacks and
-            # per-device connection tasks spawned by them.
+            while True:
+                try:
+                    await self._start_mdns_browser()
+                    break
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    self.logger.warning(
+                        f"mDNS browser failed to start ({exc}); retrying in {backoff}s"
+                    )
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, RECONNECT_BACKOFF_MAX)
+            # Work happens via mDNS callbacks and per-device connection tasks
+            # spawned by them; the loop itself only sweeps parked nodes.
             while True:
                 await asyncio.sleep(60)
+                try:
+                    self._sweep_parked()
+                except Exception:
+                    self.logger.exception("parked-node sweep failed")
         except asyncio.CancelledError:
             return
         except Exception:
             self.logger.exception("async main loop failed")
+
+    def _spawn_task(self, coro, label):
+        """Create a task, keep a strong reference, and log any exception.
+
+        asyncio only holds a weak reference to a running task, so one nobody
+        keeps can be collected mid-flight. An unretrieved exception is also
+        invisible — this logs it.
+        """
+        task = asyncio.create_task(coro)
+        self._connect_tasks.add(task)
+
+        def _done(t):
+            self._connect_tasks.discard(t)
+            if t.cancelled():
+                return
+            exc = t.exception()
+            if exc is not None:
+                self.logger.error(f"{label} task failed: {exc}")
+
+        task.add_done_callback(_done)
+        return task
 
     async def _async_shutdown(self):
         """Disconnect all device clients gracefully."""
@@ -668,6 +861,15 @@ class Plugin(indigo.PluginBase):
         )
 
     async def _handle_mdns_added(self, zeroconf, service_type, name):
+        """Wrapper so one bad advertisement can't take discovery down silently."""
+        try:
+            await self._handle_mdns_added_inner(zeroconf, service_type, name)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self.logger.exception(f"mDNS handler failed for {name}")
+
+    async def _handle_mdns_added_inner(self, zeroconf, service_type, name):
         from zeroconf.asyncio import AsyncServiceInfo
         info = AsyncServiceInfo(service_type, name)
         if not await info.async_request(zeroconf, timeout=3000):
@@ -711,12 +913,94 @@ class Plugin(indigo.PluginBase):
             self._fire_event("newDeviceDiscovered", mac)
 
         # Auto-connect (creates the Indigo node device too if auto-create is on)
-        if mac not in self.connections:
-            asyncio.create_task(self._connect_to_device(mac))
+        if self._should_connect(mac):
+            self._spawn_task(self._connect_to_device(mac), f"connect {mac}")
+
+    def _should_connect(self, mac):
+        """Should an mDNS announcement start a connection attempt?
+
+        No if one is already running, and no if the node is parked: mDNS
+        re-advertises every few minutes, so connecting on every announcement
+        would undo the back-off completely and bring the warning storm back.
+        """
+        if mac in self.connections:
+            return False
+        if mac in self.parked:
+            self.logger.debug(f"{mac}: re-advertised but parked; leaving it alone")
+            return False
+        return True
 
     # --------------------------------------------------------
     # Per-device connection
     # --------------------------------------------------------
+
+    def _release_connection(self, mac):
+        """Drop the client reference for a connection we've stopped running.
+
+        Leaving a disconnected client in place made actions look sendable when
+        nothing could reach the device.
+        """
+        conn = self.connections.get(mac)
+        if conn is not None:
+            conn["client"] = None
+
+    def _park_connection(self, mac, reason, failures):
+        """Stop retrying a node, and record why so it can be picked up later."""
+        self._release_connection(mac)
+        self.connections.pop(mac, None)
+        self.parked[mac] = {
+            "reason":   reason,
+            "since":    time.time(),
+            "failures": failures,
+        }
+
+    def _unpark(self, mac, why):
+        """Retry a parked node now. Safe to call from the asyncio thread only."""
+        if mac not in self.parked:
+            return False
+        if mac in self.connections:
+            return False
+        if mac not in self.discovered:
+            return False
+        self.parked.pop(mac, None)
+        self.logger.info(f"{mac}: retrying connection ({why})")
+        self._spawn_task(self._connect_to_device(mac), f"connect {mac}")
+        return True
+
+    def request_retry(self, mac, why):
+        """Ask the asyncio thread to retry a parked node. Callable from any thread."""
+        loop = self.async_loop
+        if loop is None or not loop.is_running():
+            return
+        loop.call_soon_threadsafe(self._unpark, mac, why)
+
+    def _sweep_parked(self):
+        """Periodic recovery: a parked node gets one more go once it has been
+        quiet for PARKED_RETRY_AFTER, or straight away once the user adds a
+        matching Indigo device."""
+        now = time.time()
+        for mac, entry in list(self.parked.items()):
+            if self._find_node_device(mac) is not None:
+                self._unpark(mac, "an Indigo device now exists for it")
+            elif now - entry.get("since", 0) >= PARKED_RETRY_AFTER:
+                self._unpark(mac, "back-off elapsed")
+
+    @staticmethod
+    def _client_is_connected(client):
+        """Is this aioesphomeapi client still connected?
+
+        `_connection` is a private attribute, so a library upgrade could remove
+        it. When it can't be read we assume the connection is up rather than
+        spinning through a reconnect every ten seconds — a genuine drop still
+        surfaces as an exception on the next call.
+        """
+        try:
+            conn = client._connection
+        except AttributeError:
+            return True
+        if conn is None:
+            return False
+        return bool(getattr(conn, "is_connected", True))
 
     async def _connect_to_device(self, mac):
         """Open a persistent aioesphomeapi connection to one ESPHome device.
@@ -731,7 +1015,11 @@ class Plugin(indigo.PluginBase):
             return
 
         self.connections[mac] = {"client": None, "info": None, "entities": {}}
-        backoff = RECONNECT_BACKOFF_INITIAL
+        self.parked.pop(mac, None)
+        backoff    = RECONNECT_BACKOFF_INITIAL
+        was_online = False
+        failures   = 0
+        last_error = ""
 
         while True:
             # Resolve encryption key fresh on each iteration so a key clear
@@ -774,6 +1062,7 @@ class Plugin(indigo.PluginBase):
                 # by entity_key. No per-entity device creation any more.
                 if self.auto_create_nodes:
                     self._ensure_node_device(mac, device_info, entities)
+                self._fire_event("deviceOnline", mac)
 
                 # subscribe_states is SYNCHRONOUS in aioesphomeapi (takes a
                 # callback, returns an unsubscribe callable). No await.
@@ -781,14 +1070,16 @@ class Plugin(indigo.PluginBase):
                     self._on_entity_state(mac, state)
                 unsubscribe = client.subscribe_states(_state_callback)
 
-                backoff = RECONNECT_BACKOFF_INITIAL
+                backoff    = RECONNECT_BACKOFF_INITIAL
+                failures   = 0
+                was_online = True
 
                 # Hold the connection open. We use a long sleep rather than
                 # an event-driven wait because aioesphomeapi doesn't expose a
                 # disconnect-waiter; reconnect happens via the exception path
                 # when the TCP connection drops and the next state callback
                 # raises, or when our outer code disconnects on shutdown.
-                while client._connection is not None and client._connection.is_connected:
+                while self._client_is_connected(client):
                     await asyncio.sleep(10)
                 self.logger.warning(f"{mac}: connection dropped")
 
@@ -799,6 +1090,7 @@ class Plugin(indigo.PluginBase):
                     "Plugin will retry on next restart."
                 )
                 self._update_node_status(mac, connected=False, status="Bad key")
+                self._release_connection(mac)
                 return  # don't keep retrying with bad key
             except (APIConnectionError, OSError, ConnectionError) as exc:
                 msg = str(exc).lower()
@@ -842,19 +1134,19 @@ class Plugin(indigo.PluginBase):
                             "in Indigo — add it and set its API encryption key to use it. "
                             "Ignoring until then."
                         )
+                    self._release_connection(mac)
                     return
-                self.logger.warning(f"{mac}: connection error: {exc}; reconnect in {backoff}s")
+                last_error = str(exc)
             except asyncio.CancelledError:
+                # The finally block below does the unsubscribe + disconnect;
+                # repeating them here just raises CancelledError again.
                 self.logger.debug(f"{mac}: connection task cancelled")
-                try:
-                    if unsubscribe:
-                        unsubscribe()
-                    await client.disconnect()
-                except Exception:
-                    pass
+                self._release_connection(mac)
                 return
-            except Exception:
-                self.logger.exception(f"{mac}: unexpected connection error")
+            except Exception as exc:
+                last_error = str(exc) or exc.__class__.__name__
+                if failures == 0:
+                    self.logger.exception(f"{mac}: unexpected connection error")
             finally:
                 if unsubscribe:
                     try:
@@ -866,14 +1158,47 @@ class Plugin(indigo.PluginBase):
                 except Exception:
                     pass
 
-            # Update node device state to disconnected
+            # --- the connection is down; decide whether to try again ---
             node = self._find_node_device(mac)
+            if was_online:
+                # A drop after a good session isn't evidence the node is bogus,
+                # so the failure count starts again from scratch.
+                was_online = False
+                failures   = 0
+                backoff    = RECONNECT_BACKOFF_INITIAL
+                self._fire_event("deviceOffline", mac)
+            failures += 1
             if node:
                 try:
                     node.updateStateOnServer("connected", False)
                     node.updateStateOnServer("status", "Disconnected")
                 except Exception:
                     pass
+
+            # Adaptive logging: say it plainly once, then go quiet.
+            if failures == 1:
+                self.logger.warning(
+                    f"{mac} at {d['ip']}: connection failed: {last_error}. "
+                    f"Retrying quietly with back-off."
+                )
+            else:
+                self.logger.debug(
+                    f"{mac}: connection failed ({failures}): {last_error}; "
+                    f"reconnect in {backoff}s"
+                )
+
+            limit = MAX_CONNECT_FAILURES_ADOPTED if node else MAX_CONNECT_FAILURES_UNADOPTED
+            if failures >= limit:
+                where = "this Indigo device" if node else \
+                        "no matching Indigo device — it may not be an ESPHome node at all"
+                self.logger.warning(
+                    f"{mac} at {d['ip']}: gave up after {failures} failed connections "
+                    f"({last_error}); {where}. No further attempts for "
+                    f"{PARKED_RETRY_AFTER // 60} minutes. Adding it as an Indigo device "
+                    "retries straight away."
+                )
+                self._park_connection(mac, last_error, failures)
+                return
 
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, RECONNECT_BACKOFF_MAX)
@@ -969,10 +1294,16 @@ class Plugin(indigo.PluginBase):
             try:
                 raw = float(state.state)
                 unit = info.get("unit", "")
-                if math.isnan(raw):
-                    val = raw
-                    ui  = "nan"
-                elif unit == "s":
+                if not math.isfinite(raw):
+                    # ESPHome reports an unavailable reading as NaN. Writing that
+                    # into a Number state poisons the state, the SQL Logger row
+                    # and anything that compares against it — drop it instead and
+                    # leave the last good value in place.
+                    self.logger.debug(
+                        f"{dev.name}: ignoring non-finite reading for '{state_id}'"
+                    )
+                    return
+                if unit == "s":
                     # Sensor reports seconds (uptime, runtime, etc). Keep
                     # the raw stored value as integer seconds — useful for
                     # script logic ("uptime > 86400") — but show a
@@ -999,9 +1330,12 @@ class Plugin(indigo.PluginBase):
             if getattr(state, "missing_state", False):
                 return
             try:
-                dev.updateStateOnServer(state_id, float(state.state))
+                num = float(state.state)
             except (TypeError, ValueError):
-                pass
+                return
+            if not math.isfinite(num):
+                return
+            dev.updateStateOnServer(state_id, num)
         elif isinstance(state, SelectState):
             if getattr(state, "missing_state", False):
                 return
@@ -1041,9 +1375,11 @@ class Plugin(indigo.PluginBase):
             except (TypeError, ValueError):
                 return
             unit = (info or {}).get("unit", "")
-            if math.isnan(raw):
-                val, ui = raw, "nan"
-            elif unit == "s":
+            if not math.isfinite(raw):
+                # See _apply_v040_state — a NaN never reaches sensorValue.
+                self.logger.debug(f"{dev.name}: ignoring non-finite headline reading")
+                return
+            if unit == "s":
                 val = int(round(raw))
                 ui  = self._format_seconds(val)
             else:
@@ -1078,9 +1414,11 @@ class Plugin(indigo.PluginBase):
                 return
             try:
                 val = float(state.state)
-                dev.updateStateOnServer("value", val)
             except (TypeError, ValueError):
                 dev.updateStateOnServer("valueText", str(state.state))
+                return
+            if math.isfinite(val):
+                dev.updateStateOnServer("value", val)
         elif isinstance(state, TextSensorState):
             if state.missing_state:
                 return
@@ -1168,9 +1506,11 @@ class Plugin(indigo.PluginBase):
             if getattr(state, "missing_state", False):
                 return
             try:
-                dev.updateStateOnServer("value", float(state.state))
+                num = float(state.state)
             except (TypeError, ValueError):
-                pass
+                return
+            if math.isfinite(num):
+                dev.updateStateOnServer("value", num)
 
         elif isinstance(state, SelectState):
             if getattr(state, "missing_state", False):
@@ -1275,20 +1615,21 @@ class Plugin(indigo.PluginBase):
         """v0.4.0: there is now exactly one Indigo device per MAC, of one
         of several types (esphomeNode/Switch/Light/Fan/Cover/Climate/Lock)
         depending on the node's primary entity. Address is always the MAC."""
-        if mac in self.nodes_by_mac:
-            return self.nodes_by_mac[mac]
+        cached = self.nodes_by_mac.get(mac)
+        if cached is not None:
+            # Re-fetch: an Indigo device object is a snapshot, and the cached
+            # one goes stale the moment the user saves the Configure dialog —
+            # which is exactly where the encryption key gets changed.
+            try:
+                fresh = indigo.devices[cached.id]
+            except Exception:
+                self.nodes_by_mac.pop(mac, None)
+                return None
+            self.nodes_by_mac[mac] = fresh
+            return fresh
         for d in indigo.devices.iter("self"):
             if d.address == mac and d.deviceTypeId in self._OUR_DEVICE_TYPES:
                 self.nodes_by_mac[mac] = d
-                return d
-        return None
-
-    def _find_entity_device(self, compound_addr):
-        if compound_addr in self.entity_devices:
-            return self.entity_devices[compound_addr]
-        for d in indigo.devices.iter("self"):
-            if d.address == compound_addr:
-                self.entity_devices[compound_addr] = d
                 return d
         return None
 
@@ -1507,123 +1848,6 @@ class Plugin(indigo.PluginBase):
         except Exception:
             return {}
 
-    def _ensure_entity_devices(self, mac, entities):
-        """v0.4.0: entities no longer become Indigo devices. They are
-        mapped to custom states on the single node device by
-        _ensure_node_device(). This method is kept as a no-op for any
-        legacy code path that might still call it."""
-        return
-
-    def _ensure_entity_devices_LEGACY(self, mac, entities):
-        """Legacy v0.3.x one-device-per-entity creator. Retained for
-        reference only — no longer reached. Will be deleted in v0.5."""
-        from aioesphomeapi import (
-            SwitchInfo, SensorInfo, BinarySensorInfo, LightInfo, TextSensorInfo,
-            FanInfo, CoverInfo, ClimateInfo, LockInfo, NumberInfo, SelectInfo,
-        )
-        folder_id = self._ensure_device_folder(DEVICE_FOLDER_NAME)
-        for e in entities:
-            type_id = None
-            extra_props = {}
-            if isinstance(e, SwitchInfo):
-                type_id = "esphomeSwitch"
-            elif isinstance(e, BinarySensorInfo):
-                type_id = "esphomeBinarySensor"
-                extra_props["deviceClass"] = getattr(e, "device_class", "") or ""
-            elif isinstance(e, SensorInfo):
-                type_id = "esphomeSensor"
-                extra_props["unit"] = getattr(e, "unit_of_measurement", "") or ""
-                # Tell Indigo this is NOT a relay. Hidden XML defaults are
-                # NOT applied at indigo.device.create() — must be in props.
-                extra_props["SupportsOnState"]     = False
-                extra_props["SupportsSensorValue"] = False
-                extra_props["isTextSensor"]        = False
-            elif isinstance(e, TextSensorInfo):
-                type_id = "esphomeSensor"
-                extra_props["SupportsOnState"]     = False
-                extra_props["SupportsSensorValue"] = False
-                extra_props["isTextSensor"]        = True
-            elif isinstance(e, LightInfo):
-                type_id = "esphomeLight"
-                modes = set(getattr(e, "supported_color_modes", []) or [])
-                # ColorMode int values: 1=on/off, 2=brightness, 11=color_temp,
-                # 19=rgb_white, 27=rgb_cold_warm_white, 35=rgb. Presence of
-                # any RGB-capable mode means SupportsColor / SupportsRGB.
-                extra_props["SupportsColor"]            = any(m >= 19 for m in modes)
-                extra_props["SupportsRGB"]              = any(m >= 19 for m in modes)
-                extra_props["SupportsWhite"]            = 11 in modes or 27 in modes
-                extra_props["SupportsWhiteTemperature"] = 11 in modes or 27 in modes
-            elif isinstance(e, FanInfo):
-                type_id = "esphomeFan"
-                # aioesphomeapi's attribute is `supported_speed_count` (not
-                # `supported_speed_levels` despite the protobuf field naming).
-                extra_props["speedLevels"]          = str(getattr(e, "supported_speed_count", 0) or 0)
-                extra_props["supportsOscillation"]  = bool(getattr(e, "supports_oscillation", False))
-                extra_props["supportsDirection"]    = bool(getattr(e, "supports_direction", False))
-            elif isinstance(e, CoverInfo):
-                type_id = "esphomeCover"
-                extra_props["supportsPosition"]     = bool(getattr(e, "supports_position", True))
-                extra_props["supportsTilt"]         = bool(getattr(e, "supports_tilt", False))
-                extra_props["deviceClass"]          = getattr(e, "device_class", "") or ""
-            elif isinstance(e, LockInfo):
-                type_id = "esphomeLock"
-                extra_props["supportsOpen"] = bool(getattr(e, "supports_open", False))
-                extra_props["requiresCode"] = bool(getattr(e, "requires_code", False))
-            elif isinstance(e, NumberInfo):
-                type_id = "esphomeNumber"
-                extra_props["minValue"] = str(getattr(e, "min_value", 0) or 0)
-                extra_props["maxValue"] = str(getattr(e, "max_value", 0) or 0)
-                extra_props["step"]     = str(getattr(e, "step",      1) or 1)
-                extra_props["unit"]     = getattr(e, "unit_of_measurement", "") or ""
-            elif isinstance(e, SelectInfo):
-                type_id = "esphomeSelect"
-                opts = list(getattr(e, "options", []) or [])
-                extra_props["options"] = ", ".join(str(o) for o in opts)
-            elif isinstance(e, ClimateInfo):
-                type_id = "esphomeClimate"
-                modes = list(getattr(e, "supported_modes", []) or [])
-                extra_props["visualMin"]            = str(getattr(e, "visual_min_temperature", 0) or 0)
-                extra_props["visualMax"]            = str(getattr(e, "visual_max_temperature", 0) or 0)
-                extra_props["supportedModes"]       = ", ".join(str(m).split(".")[-1] for m in modes)
-                extra_props["twoPoint"]             = bool(getattr(e, "supports_two_point_target_temperature", False))
-                extra_props["NumTemperatureInputs"] = "1" if getattr(e, "supports_current_temperature", False) else "0"
-                # Heat/Cool setpoint flags driven by which modes the device exposes
-                mode_names = [str(m).upper() for m in modes]
-                has_heat = any("HEAT" in n for n in mode_names)
-                has_cool = any("COOL" in n for n in mode_names)
-                extra_props["SupportsHeatSetpoint"] = has_heat or extra_props["twoPoint"]
-                extra_props["SupportsCoolSetpoint"] = has_cool or extra_props["twoPoint"]
-                extra_props["SupportsHvacOperationMode"] = True
-                extra_props["SupportsHvacFanMode"]  = bool(getattr(e, "supported_fan_modes", []) or [])
-            else:
-                continue  # unknown / unsupported entity type for v0.1
-
-            compound = f"{mac}_{e.key}"
-            if self._find_entity_device(compound):
-                continue   # already exists
-
-            name = f"{self.discovered[mac]['hostname']} - {e.name or e.object_id}"
-            props = {
-                "address":     compound,
-                "nodeMac":     mac,
-                "entityKey":   str(e.key),
-                "entityName":  e.name or e.object_id or "",
-                **extra_props,
-            }
-            try:
-                dev = indigo.device.create(
-                    protocol=indigo.kProtocol.Plugin,
-                    pluginId=self.pluginId,
-                    address=compound,
-                    name=name,
-                    deviceTypeId=type_id,
-                    props=props,
-                    folder=folder_id,
-                )
-                self.entity_devices[compound] = dev
-                self.logger.info(f"  + Entity: {dev.name} ({type_id}, key={e.key})")
-            except Exception:
-                self.logger.exception(f"Failed to create entity device {compound}")
 
     # --------------------------------------------------------
     # Indigo native control callbacks
@@ -1835,6 +2059,26 @@ class Plugin(indigo.PluginBase):
             return
 
         self.logger.debug(f"actionControlDevice: no handler for type {dev.deviceTypeId} on {dev.name}")
+
+    def actionControlSensor(self, action, dev):
+        """Sensor-class devices (esphomeSensor) get their own action callback.
+
+        Declaring type="sensor" obliges the plugin to implement this — without
+        it Indigo logs 'plugin does not define method actionControlSensor' and
+        drops the action. Readings arrive over the subscription, so a status
+        request only has to confirm the node is connected.
+        """
+        sa = getattr(action, "sensorAction", None)
+        if sa == indigo.kSensorAction.RequestStatus:
+            conn = self.connections.get(dev.address, {})
+            if conn.get("client") is not None:
+                self.logger.info(
+                    f"{dev.name}: connected — readings stream in as the device sends them."
+                )
+            else:
+                self.logger.warning(f"{dev.name}: not connected to {dev.address}")
+            return
+        self.logger.debug(f"Unhandled sensor action {sa} on {dev.name}")
 
     # --------------------------------------------------------
     # Custom actions (Actions.xml)
@@ -2129,15 +2373,39 @@ class Plugin(indigo.PluginBase):
         self.logger.info("mDNS browser restarted - any retained advertisements will replay")
 
     def menuListSeenDevices(self, valuesDict=None, typeId=None):
+        """List every node seen via mDNS, with what the plugin made of each.
+
+        Tags: CONNECTED (talking to us), ADOPTED (has an Indigo device),
+        DISCOVERED (seen, no Indigo device), PARKED (stopped retrying — most
+        often something that isn't an ESPHome node but shares the mDNS
+        service type, such as a SMLIGHT Zigbee coordinator).
+        """
         if not self.discovered:
             indigo.server.log("No ESPHome devices discovered yet")
             return
         for mac, d in sorted(self.discovered.items()):
-            connected = mac in self.connections and self.connections[mac].get("info")
-            tag = "[CONNECTED]" if connected else "[DISCOVERED]"
+            if mac in self.parked:
+                tag = "[PARKED]"
+            elif mac in self.connections and self.connections[mac].get("info"):
+                tag = "[CONNECTED]"
+            elif self._find_node_device(mac) is not None:
+                tag = "[ADOPTED]"
+            else:
+                tag = "[DISCOVERED]"
             indigo.server.log(
-                f"  {tag} {mac}  {d['hostname']:<25} {d['ip']:<16} "
+                f"  {tag:<13} {mac}  {d['hostname']:<25} {d['ip']:<16} "
                 f"esphome {d.get('version','?')} board={d.get('board','?')}"
+            )
+        for mac, entry in sorted(self.parked.items()):
+            mins = int((time.time() - entry.get("since", 0)) // 60)
+            indigo.server.log(
+                f"  PARKED {mac} for {mins} min after {entry.get('failures', 0)} "
+                f"failed connections: {entry.get('reason', 'unknown')}"
+            )
+        if self.parked:
+            indigo.server.log(
+                "  A parked node is retried automatically once the back-off "
+                "elapses, or straight away if you add it as an Indigo device."
             )
 
     def menuDumpEntities(self, valuesDict=None, typeId=None):
@@ -2296,7 +2564,7 @@ class Plugin(indigo.PluginBase):
             ("Discovered:",        str(len(self.discovered))),
             ("Connected:",         str(connected)),
             ("Indigo nodes:",      str(len(self.nodes_by_mac))),
-            ("Indigo entities:",   str(len(self.entity_devices))),
+            ("Parked nodes:",      str(len(self.parked))),
             ("Timestamps in Log:", "ON" if self.timestamp_enabled else "OFF"),
         ]
         if log_startup_banner:
@@ -2333,10 +2601,14 @@ class Plugin(indigo.PluginBase):
 
     def deviceStartComm(self, dev):
         # v0.4.0: every device created by this plugin is now a node device
-        # (one per ESPHome node). entity_devices dict kept only for
-        # transitional compat with any code path that still references it.
+        # (one per ESPHome node).
         if dev.deviceTypeId in self._OUR_DEVICE_TYPES:
             self.nodes_by_mac[dev.address] = dev
+            # Adding (or re-enabling) a device for a parked node is the clearest
+            # possible signal that the user wants it connected — try again now
+            # rather than making them restart the plugin.
+            if dev.address in self.parked:
+                self.request_retry(dev.address, "device added or re-enabled in Indigo")
 
     def deviceStopComm(self, dev):
         if dev.deviceTypeId in self._OUR_DEVICE_TYPES:
@@ -2362,6 +2634,6 @@ class Plugin(indigo.PluginBase):
     def closedPrefsConfigUi(self, valuesDict, userCancelled):
         if userCancelled:
             return
-        self.default_encryption_key = valuesDict.get("defaultEncryptionKey", "") or ""
-        self.auto_create_nodes      = bool(valuesDict.get("autoCreateDevices", True))
-        self.auto_create_entities   = bool(valuesDict.get("autoCreateEntities", True))
+        self.default_encryption_key = self._resolve_default_key(valuesDict)
+        self.auto_create_nodes      = as_bool(valuesDict.get("autoCreateDevices", True), True)
+        self._apply_log_level(valuesDict.get("logLevel", "INFO"))

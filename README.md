@@ -35,13 +35,44 @@ with native controls.
 
 ## Status
 
-**Public beta (v0.2.x).** Validated end-to-end on Athom plugs and a
+**Public beta (v0.7.x).** Validated end-to-end on Athom plugs and a
 custom ESP32 test rig running ESPHome 2026.4.x. Switch, dimmer, fan
 (with variable speed), cover (with position) and sensor entity types
 all confirmed working round-trip. RGB lights, climate, lock, and BLE
 proxy support exist in code but are not yet validated against real
 hardware. Report issues at the
 [GitHub repo](https://github.com/Highsteads/ESPHomeBridge/issues).
+
+### Recent changes
+
+**v0.7.0** — a full review pass.
+
+- **Devices that only pretend to be ESPHome no longer flood the log.** Some
+  hardware borrows ESPHome's mDNS service name and opens port 6053 without
+  speaking the protocol — a SMLIGHT Zigbee coordinator is the one that caught
+  us out. The plugin used to retry such a node forever and warn every 35
+  seconds. Now it warns once, retries quietly with a growing gap, then leaves
+  the node alone and says why. It tries again an hour later, or straight away
+  if you add the node as an Indigo device.
+- **List Discovered Devices** now tells you what became of each node —
+  connected, adopted, discovered or parked — so you can see at a glance what
+  the plugin is ignoring and why.
+- **Entity states can no longer overwrite each other.** A firmware entity
+  called "Status" used to land on top of the plugin's own connection status,
+  and a "Battery Level" sensor wrote to a name Indigo reserves for itself, so
+  the reading vanished. Both now get a state of their own.
+- **Unavailable readings are dropped rather than stored.** An ESPHome sensor
+  reports "no reading" as NaN, which used to be written straight into the
+  device state and spoiled everything that read it.
+- **Safer upgrade path.** The one-off v0.4.0 clean-up now only removes devices
+  from the old one-device-per-entity layout, so it can never take a working
+  set with it.
+- **Preferences behave.** A saved tick-box no longer reads as its opposite, and
+  the Log Level you pick in Configure now takes effect.
+- **Sensor nodes answer a status request** instead of Indigo reporting a
+  missing method.
+- The default encryption key can live in `IndigoSecrets.py` as
+  `ESPHOME_DEFAULT_ENCRYPTION_KEY`, with the Configure field as the fallback.
 
 ---
 
@@ -114,8 +145,7 @@ This takes ~30 seconds on the first run; instant thereafter.
 | Setting | Purpose |
 |---|---|
 | **Auto-create Indigo devices on discovery** | When a new ESPHome device is discovered, automatically create the matching Indigo node device. Default on. |
-| **Auto-create individual entity devices** | If on, also auto-create one Indigo device per controllable entity (switch, light, etc.). If off, only the parent `esphomeNode` is created. Default on. |
-| **Default API Encryption Key** | Base64-encoded key from your YAML's `api: encryption: key:` line. Used for any device that doesn't have its own key set in its device-config dialog. Leave blank for unencrypted devices. |
+| **Default API Encryption Key** | Base64 key from your YAML's `api: encryption: key:` line. Used for any device with no key of its own. Leave blank for unencrypted devices. Read from `IndigoSecrets.py` (`ESPHOME_DEFAULT_ENCRYPTION_KEY`) first if you keep one — this field is the fallback. |
 | **Log Level** | Standard Indigo log levels. |
 
 Per-device encryption keys can override the default in each
@@ -265,7 +295,7 @@ Available under `Plugins → ESPHome Bridge`:
 | Menu item | Purpose |
 |---|---|
 | **Discover ESPHome Devices Now** | Restart the mDNS browser. Any retained advertisements replay. |
-| **List Discovered Devices** | Print a one-line summary of every discovered ESPHome device to the event log. |
+| **List Discovered Devices** | Print a line per discovered node, tagged CONNECTED, ADOPTED, DISCOVERED or PARKED, plus why anything was parked. |
 | **Dump All Entities to Log** | For every connected device, print its full entity list (key, type, name, object_id). Verbose; for debugging. |
 | **Show Plugin Info** | Re-print the startup banner with current device counts and connection status. |
 
@@ -366,6 +396,20 @@ Per-device connection lifecycle:
    device joined the LAN after the plugin started.
 4. **Watch the log.** `Plugins → ESPHome Bridge → Show Plugin Info`
    prints connection status counts.
+
+### A node was "parked" and the plugin stopped connecting to it
+
+The log line reads `gave up after N failed connections`. That happens when a
+node accepts the TCP connection but never finishes the ESPHome handshake —
+most often because it isn't an ESPHome device at all. Several vendors reuse
+ESPHome's mDNS service name, so the plugin sees them advertised even though
+they can't talk to it. SMLIGHT's Zigbee coordinators are a known example.
+
+Nothing to do if that's what it is. `List Discovered Devices` shows every
+parked node and the error that parked it. The plugin tries again an hour
+later, and immediately if you add the node as an Indigo device — so a real
+ESPHome node that was merely rebooting or off the network comes back on its
+own.
 
 ### `Connection requires encryption` (repeating)
 

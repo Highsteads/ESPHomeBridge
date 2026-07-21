@@ -529,16 +529,16 @@ When adding a new entity type, also update:
 
 ## Logging
 
-Every log line is prefixed with a millisecond timestamp `[HH:MM:SS.mmm]` so
-events can be correlated tightly with other CliveS plugins (Device Activity
-Monitor uses the same convention).
+Every log line carries a millisecond timestamp `[HH:MM:SS.mmm]`, so you can
+line events up precisely against the other CliveS plugins — Device Activity
+Monitor uses the same format.
 
-To turn the prefix off (or back on) at any time:
+To turn the prefix off, or back on, at any time:
 
 **Plugins → ESPHome Bridge → Toggle Timestamps in Log (on/off)**
 
-The setting is stored in `pluginPrefs` (`timestampEnabled`) and persists across
-restarts. Defaults to ON.
+The plugin stores the setting in `pluginPrefs` (`timestampEnabled`) and it
+survives a restart. It defaults to ON.
 
 ## Authors & licence
 

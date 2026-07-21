@@ -81,8 +81,31 @@ RECONNECT_BACKOFF_MAX     = 300
 # Helpers
 # ============================================================
 
+import logging
+
+
+_LOG_LEVELS = {
+    "DEBUG":   logging.DEBUG,
+    "INFO":    logging.INFO,
+    "WARNING": logging.WARNING,
+    "ERROR":   logging.ERROR,
+    "CRITICAL": logging.CRITICAL,
+}
+
+
+def _lvl(level):
+    """Map a level NAME to a Python logging int.
+
+    indigo.server.log(level=...) wants an int. A STRING is silently ignored
+    and the line logs as plain Info (21-07-2026 estate-wide sweep).
+    """
+    if isinstance(level, int):
+        return level
+    return _LOG_LEVELS.get(str(level).upper(), logging.INFO)
+
+
 def log(message, level="INFO"):
-    indigo.server.log(f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] {message}", level=level)
+    indigo.server.log(f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] {message}", level=_lvl(level))
 
 
 def normalise_mac(raw):

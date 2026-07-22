@@ -35,7 +35,7 @@ with native controls.
 
 ## Status
 
-**Public beta (v0.7.x).** Validated end-to-end on Athom plugs and a
+**Public beta (v0.8.x).** Validated end-to-end on Athom plugs and a
 custom ESP32 test rig running ESPHome 2026.4.x. Switch, dimmer, fan
 (with variable speed), cover (with position) and sensor entity types
 all confirmed working round-trip. RGB lights, climate, lock, and BLE
@@ -44,6 +44,17 @@ hardware. Report issues at the
 [GitHub repo](https://github.com/Highsteads/ESPHomeBridge/issues).
 
 ### Recent changes
+
+**v0.8.0** — an ignore list.
+
+- **You can now tell the plugin to leave a device alone for good.** The new
+  Configure field **Ignore these devices** takes MAC addresses, hostnames or
+  IPs (comma or space separated). Listed devices are never connected to,
+  never parked and never warned about — the right answer for hardware that
+  advertises like an ESPHome node but is not one, such as a SMLIGHT Zigbee
+  coordinator, which would otherwise produce a "gave up after 3 failed
+  connections" warning every hour. Ignored nodes show as `[IGNORED]` in
+  List Discovered Devices, and changes apply as soon as you save the dialog.
 
 **v0.7.0** — a full review pass.
 
@@ -145,6 +156,7 @@ This takes ~30 seconds on the first run; instant thereafter.
 | Setting | Purpose |
 |---|---|
 | **Auto-create Indigo devices on discovery** | When a new ESPHome device is discovered, automatically create the matching Indigo node device. Default on. |
+| **Ignore these devices** | MAC addresses, hostnames or IP addresses (comma or space separated) the plugin should never connect to or warn about. For hardware that advertises like an ESPHome node but is not one — a SMLIGHT Zigbee coordinator, for example. The List Discovered Devices menu item shows each node's MAC. |
 | **Default API Encryption Key** | Base64 key from your YAML's `api: encryption: key:` line. Used for any device with no key of its own. Leave blank for unencrypted devices. Read from `IndigoSecrets.py` (`ESPHOME_DEFAULT_ENCRYPTION_KEY`) first if you keep one — this field is the fallback. |
 | **Log Level** | Standard Indigo log levels. |
 
@@ -295,7 +307,7 @@ Available under `Plugins → ESPHome Bridge`:
 | Menu item | Purpose |
 |---|---|
 | **Discover ESPHome Devices Now** | Restart the mDNS browser. Any retained advertisements replay. |
-| **List Discovered Devices** | Print a line per discovered node, tagged CONNECTED, ADOPTED, DISCOVERED or PARKED, plus why anything was parked. |
+| **List Discovered Devices** | Print a line per discovered node, tagged CONNECTED, ADOPTED, DISCOVERED, PARKED or IGNORED, plus why anything was parked. |
 | **Dump All Entities to Log** | For every connected device, print its full entity list (key, type, name, object_id). Verbose; for debugging. |
 | **Show Plugin Info** | Re-print the startup banner with current device counts and connection status. |
 
@@ -405,9 +417,11 @@ most often because it isn't an ESPHome device at all. Several vendors reuse
 ESPHome's mDNS service name, so the plugin sees them advertised even though
 they can't talk to it. SMLIGHT's Zigbee coordinators are a known example.
 
-Nothing to do if that's what it is. `List Discovered Devices` shows every
-parked node and the error that parked it. The plugin tries again an hour
-later, and immediately if you add the node as an Indigo device — so a real
+If that's what it is, add the node's MAC (or IP or hostname) to **Ignore
+these devices** in the plugin's Configure dialog — it will never be probed
+or warned about again. `List Discovered Devices` shows every parked node and
+the error that parked it. An un-ignored parked node is retried an hour
+later, and immediately if you add it as an Indigo device — so a real
 ESPHome node that was merely rebooting or off the network comes back on its
 own.
 

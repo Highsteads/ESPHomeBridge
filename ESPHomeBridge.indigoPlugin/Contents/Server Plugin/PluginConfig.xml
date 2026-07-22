@@ -14,6 +14,11 @@
         <Description>Untick to keep discovery running without creating anything. Devices you have already added keep working.</Description>
     </Field>
 
+    <Field id="ignoredDevices" type="textfield" defaultValue="">
+        <Label>Ignore these devices:</Label>
+        <Description>Comma or space separated MAC addresses, hostnames or IP addresses. Listed devices are never connected to and never warned about — use this for hardware that advertises like an ESPHome node but is not one (a SMLIGHT Zigbee coordinator, for example). The 'List Seen Devices' menu item shows each device's MAC.</Description>
+    </Field>
+
     <Field id="sep1" type="separator"/>
 
     <Field id="authHeader" type="label">

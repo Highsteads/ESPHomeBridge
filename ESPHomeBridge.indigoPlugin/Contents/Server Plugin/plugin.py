@@ -5,8 +5,15 @@
 #              Auto-discovers via mDNS, connects per device via aioesphomeapi,
 #              maps each ESPHome entity to a native Indigo device.
 # Author:      CliveS & Claude Opus 4.8
-# Date:        21-07-2026
-# Version:     0.7.1
+# Date:        22-07-2026
+# Version:     0.8.0
+#
+# v0.8.0 (22-07-2026): ignore list. New Configure field 'Ignore these devices'
+# (MACs, hostnames or IPs, comma/space separated) for hardware that advertises
+# _esphomelib._tcp but is not an ESPHome node — the SMLIGHT SMHUB/SLZB boxes
+# being the live case. Ignored devices are never probed, parked or warned
+# about, show as [IGNORED] in List Seen Devices, and a prefs change takes
+# effect immediately (parked entries dropped, live retry loops ended).
 #
 # v0.7.1 (21-07-2026): shared plugin_utils.py refreshed to v1.3 — the
 # estate-wide propagation of the four Appliance Monitor deep-review fixes.
@@ -95,7 +102,7 @@ except ImportError:
 # ============================================================
 
 PLUGIN_ID      = "com.clives.indigoplugin.esphomebridge"
-PLUGIN_VERSION = "0.7.1"
+PLUGIN_VERSION = "0.8.0"
 
 DEVICE_FOLDER_NAME = "ESPHome"
 
@@ -177,6 +184,29 @@ def normalise_mac(raw):
     if not raw:
         return ""
     return "".join(c for c in raw.upper() if c in "0123456789ABCDEF")[:12]
+
+
+def parse_ignore_list(raw):
+    """Parse the Configure dialog's 'Ignore these devices' field.
+
+    Tokens are comma or space separated. A token that is a MAC in any common
+    notation (AABBCC001122, aa:bb:cc:00:11:22, aa-bb-cc-00-11-22) is stored
+    normalised; anything else is kept as a lower-cased hostname or IP token.
+    A trailing '.local' is stripped so 'slzb-06.local' and 'slzb-06' both
+    match. Blank or junk input yields an empty set — never raises.
+    """
+    tokens = set()
+    for tok in (raw or "").replace(",", " ").split():
+        bare = tok.replace(":", "").replace("-", "")
+        if len(bare) == 12 and all(c in "0123456789abcdefABCDEF" for c in bare):
+            tokens.add(bare.upper())
+        else:
+            host = tok.lower().rstrip(".")
+            if host.endswith(".local"):
+                host = host[: -len(".local")]
+            if host:
+                tokens.add(host)
+    return tokens
 
 
 def is_valid_state_id(key):
@@ -331,6 +361,12 @@ class Plugin(indigo.PluginBase):
         # Config
         self.auto_create_nodes = as_bool(pluginPrefs.get("autoCreateDevices", True), True)
         self.default_encryption_key = self._resolve_default_key(pluginPrefs)
+
+        # Never probe these: MACs / hostnames / IPs from the Configure dialog.
+        # For hardware that advertises _esphomelib._tcp but isn't an ESPHome
+        # node (the SMLIGHT case in the adaptive-tier comment above).
+        self.ignored_tokens = parse_ignore_list(pluginPrefs.get("ignoredDevices", ""))
+        self._ignore_conflict_warned = set()   # one warning per conflicting MAC
 
         # Startup banner moved to showPluginInfo on demand (revised 25-May-2026 per Jay).
 
@@ -916,6 +952,24 @@ class Plugin(indigo.PluginBase):
             "first_seen": time.time(),
         }
 
+        if self._is_ignored(mac, hostname=hostname, ip=ip):
+            # On the Configure dialog's ignore list: keep the discovery details
+            # so List Seen Devices can show it, but never probe, park or warn.
+            self.parked.pop(mac, None)
+            if is_new:
+                self.logger.debug(
+                    f"{mac} ({hostname} at {ip}): on the ignore list; not connecting"
+                )
+            node = self._find_node_device(mac)
+            if node is not None and mac not in self._ignore_conflict_warned:
+                self._ignore_conflict_warned.add(mac)
+                self.logger.warning(
+                    f"{mac} is on the ignore list but Indigo device '{node.name}' "
+                    "exists for it — the ignore list wins and the device will stay "
+                    "disconnected. Remove one or the other to clear this warning."
+                )
+            return
+
         if is_new:
             self.logger.info(
                 f"Discovered ESPHome device {mac}: {hostname} at {ip}:{port} "
@@ -927,13 +981,33 @@ class Plugin(indigo.PluginBase):
         if self._should_connect(mac):
             self._spawn_task(self._connect_to_device(mac), f"connect {mac}")
 
+    def _is_ignored(self, mac, hostname="", ip=""):
+        """Is this node on the Configure dialog's ignore list?
+
+        Matches by MAC, hostname (with or without .local) or IP. When the
+        caller has no hostname/ip to hand, the discovery cache fills them in.
+        """
+        if not self.ignored_tokens:
+            return False
+        d = self.discovered.get(mac, {})
+        hostname = (hostname or d.get("hostname", "")).lower().rstrip(".")
+        if hostname.endswith(".local"):
+            hostname = hostname[: -len(".local")]
+        ip = ip or d.get("ip", "")
+        return (mac in self.ignored_tokens
+                or (hostname != "" and hostname in self.ignored_tokens)
+                or (ip != "" and ip in self.ignored_tokens))
+
     def _should_connect(self, mac):
         """Should an mDNS announcement start a connection attempt?
 
-        No if one is already running, and no if the node is parked: mDNS
-        re-advertises every few minutes, so connecting on every announcement
-        would undo the back-off completely and bring the warning storm back.
+        No if the node is on the ignore list, no if a connection is already
+        running, and no if the node is parked: mDNS re-advertises every few
+        minutes, so connecting on every announcement would undo the back-off
+        completely and bring the warning storm back.
         """
+        if self._is_ignored(mac):
+            return False
         if mac in self.connections:
             return False
         if mac in self.parked:
@@ -991,6 +1065,10 @@ class Plugin(indigo.PluginBase):
         matching Indigo device."""
         now = time.time()
         for mac, entry in list(self.parked.items()):
+            if self._is_ignored(mac):
+                # Newly ignored via the Configure dialog — drop it for good.
+                self.parked.pop(mac, None)
+                continue
             if self._find_node_device(mac) is not None:
                 self._unpark(mac, "an Indigo device now exists for it")
             elif now - entry.get("since", 0) >= PARKED_RETRY_AFTER:
@@ -1023,6 +1101,8 @@ class Plugin(indigo.PluginBase):
 
         d = self.discovered.get(mac)
         if not d:
+            return
+        if self._is_ignored(mac):
             return
 
         self.connections[mac] = {"client": None, "info": None, "entities": {}}
@@ -1170,6 +1250,12 @@ class Plugin(indigo.PluginBase):
                     pass
 
             # --- the connection is down; decide whether to try again ---
+            if self._is_ignored(mac):
+                # Added to the ignore list while this task was running.
+                self.logger.info(f"{mac}: on the ignore list — stopping connection attempts")
+                self._release_connection(mac)
+                self.connections.pop(mac, None)
+                return
             node = self._find_node_device(mac)
             if was_online:
                 # A drop after a good session isn't evidence the node is bogus,
@@ -2389,13 +2475,16 @@ class Plugin(indigo.PluginBase):
         Tags: CONNECTED (talking to us), ADOPTED (has an Indigo device),
         DISCOVERED (seen, no Indigo device), PARKED (stopped retrying — most
         often something that isn't an ESPHome node but shares the mDNS
-        service type, such as a SMLIGHT Zigbee coordinator).
+        service type, such as a SMLIGHT Zigbee coordinator), IGNORED (on the
+        Configure dialog's ignore list — never probed).
         """
         if not self.discovered:
             indigo.server.log("No ESPHome devices discovered yet")
             return
         for mac, d in sorted(self.discovered.items()):
-            if mac in self.parked:
+            if self._is_ignored(mac):
+                tag = "[IGNORED]"
+            elif mac in self.parked:
                 tag = "[PARKED]"
             elif mac in self.connections and self.connections[mac].get("info"):
                 tag = "[CONNECTED]"
@@ -2648,3 +2737,33 @@ class Plugin(indigo.PluginBase):
         self.default_encryption_key = self._resolve_default_key(valuesDict)
         self.auto_create_nodes      = as_bool(valuesDict.get("autoCreateDevices", True), True)
         self._apply_log_level(valuesDict.get("logLevel", "INFO"))
+
+        old_tokens = self.ignored_tokens
+        self.ignored_tokens = parse_ignore_list(valuesDict.get("ignoredDevices", ""))
+        if self.ignored_tokens != old_tokens:
+            self._ignore_conflict_warned.clear()
+            for mac, d in sorted(self.discovered.items()):
+                if self._is_ignored(mac):
+                    self.logger.info(
+                        f"{mac} ({d.get('hostname', '?')} at {d.get('ip', '?')}): "
+                        "on the ignore list; no further connection attempts"
+                    )
+            loop = self.async_loop
+            if loop is not None and loop.is_running():
+                loop.call_soon_threadsafe(self._apply_ignore_list_now)
+
+    def _apply_ignore_list_now(self):
+        """Runs on the asyncio loop after a prefs change: stop anything that is
+        now ignored straight away, rather than waiting for the next parked
+        sweep or back-off tick."""
+        for mac in list(self.parked):
+            if self._is_ignored(mac):
+                self.parked.pop(mac, None)
+        for mac, conn in list(self.connections.items()):
+            if not self._is_ignored(mac):
+                continue
+            client = conn.get("client")
+            if client is not None:
+                # Drop the transport; the connect task's post-disconnect
+                # ignore check then ends its retry loop.
+                self._spawn_task(client.disconnect(), f"disconnect {mac}")

@@ -45,6 +45,10 @@ hardware. Report issues at the
 
 ### Recent changes
 
+**v0.8.1** — correcting an encryption key now reconnects the device, instead of needing a plugin restart.
+
+- **Putting the right key in appeared to do nothing.** If a node was turned away because its API encryption key was wrong, or because it wanted one and the plugin had none, the plugin stopped trying — sensible enough, since retrying a key you know is wrong only fills the log. But it also left that node in a state nothing could wake. You could open the device, type in the correct key, save, and watch absolutely nothing happen; the only way back was restarting the plugin. That was doubly annoying because the plugin was already watching for that exact edit and meant to act on it. It now sets the node properly aside and picks it straight back up the moment a key arrives, whether you set it on the device or as the plugin-wide default. Nodes waiting on a key are left alone until you act, so a wrong key still won't fill the log with pointless retries.
+
 **v0.8.0** — an ignore list.
 
 - **You can now tell the plugin to leave a device alone for good.** The new

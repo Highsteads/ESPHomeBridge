@@ -4,9 +4,9 @@
 # Description: Indigo bridge for ESPHome devices via the Native API (port 6053).
 #              Auto-discovers via mDNS, connects per device via aioesphomeapi,
 #              maps each ESPHome entity to a native Indigo device.
-# Author:      CliveS & Claude Opus 4.8
+# Author:      CliveS & Claude Opus 5
 # Date:        22-07-2026
-# Version:     0.8.0
+# Version:     0.8.1
 #
 # v0.8.0 (22-07-2026): ignore list. New Configure field 'Ignore these devices'
 # (MACs, hostnames or IPs, comma/space separated) for hardware that advertises
@@ -102,7 +102,7 @@ except ImportError:
 # ============================================================
 
 PLUGIN_ID      = "com.clives.indigoplugin.esphomebridge"
-PLUGIN_VERSION = "0.8.0"
+PLUGIN_VERSION = "0.8.1"
 
 DEVICE_FOLDER_NAME = "ESPHome"
 
@@ -126,6 +126,14 @@ MAX_CONNECT_FAILURES_UNADOPTED = 3    # merely discovered — likely not ours at
 # How long a parked node is left alone before one more attempt. Adding it as an
 # Indigo device un-parks it immediately (see deviceStartComm).
 PARKED_RETRY_AFTER = 3600         # seconds
+
+# Park reason for a node that cannot connect until the USER does something
+# (supplies or corrects an API encryption key). Retrying on a timer just
+# reproduces the same failure and the log noise the parking exists to stop, so
+# _sweep_parked leaves these alone — they are woken only by an explicit signal:
+# the device's key being edited (deviceStartComm) or the default key changing
+# (closedPrefsConfigUi).
+PARK_NEEDS_KEY = "needs encryption key"
 
 
 # ============================================================
@@ -1069,10 +1077,27 @@ class Plugin(indigo.PluginBase):
                 # Newly ignored via the Configure dialog — drop it for good.
                 self.parked.pop(mac, None)
                 continue
+            if entry.get("reason") == PARK_NEEDS_KEY:
+                # Waiting on the user, not on time or on a device existing. An
+                # automatic retry here would fail identically and — because the
+                # device-exists branch below fires on EVERY sweep — would turn a
+                # single bad key into a reconnect/fail/park storm once a minute.
+                continue
             if self._find_node_device(mac) is not None:
                 self._unpark(mac, "an Indigo device now exists for it")
             elif now - entry.get("since", 0) >= PARKED_RETRY_AFTER:
                 self._unpark(mac, "back-off elapsed")
+
+    def retry_nodes_awaiting_key(self, why):
+        """Wake every node parked for want of a usable encryption key.
+
+        Called when the user supplies one — either on a device (deviceStartComm,
+        via didDeviceCommPropertyChange) or as the plugin-wide default
+        (closedPrefsConfigUi). Safe from any thread.
+        """
+        for mac, entry in list(self.parked.items()):
+            if entry.get("reason") == PARK_NEEDS_KEY:
+                self.request_retry(mac, why)
 
     @staticmethod
     def _client_is_connected(client):
@@ -1177,12 +1202,18 @@ class Plugin(indigo.PluginBase):
             except InvalidAuthAPIError:
                 self.logger.error(
                     f"{mac}: invalid API encryption key. Set the correct key in "
-                    "the device's Configure dialog or in the plugin's default key. "
-                    "Plugin will retry on next restart."
+                    "the device's Configure dialog, or in the plugin's default key, "
+                    "and it will reconnect straight away."
                 )
                 self._update_node_status(mac, connected=False, status="Bad key")
-                self._release_connection(mac)
-                return  # don't keep retrying with bad key
+                # PARK, don't just null the client. _release_connection leaves the
+                # MAC in self.connections, and a zombie entry there blocks BOTH
+                # recovery routes: _should_connect refuses while `mac in
+                # self.connections`, and deviceStartComm's retry only fires for a
+                # mac in self.parked. Correcting the key therefore did nothing and
+                # the node stayed dead until a plugin restart.
+                self._park_connection(mac, PARK_NEEDS_KEY, failures)
+                return  # don't keep retrying with a known-bad key
             except (APIConnectionError, OSError, ConnectionError) as exc:
                 msg = str(exc).lower()
                 # Device is plaintext but we sent encryption handshake.
@@ -1212,8 +1243,7 @@ class Plugin(indigo.PluginBase):
                         # Configured Indigo device without a usable key — actionable.
                         self.logger.error(
                             f"{mac}: {exc}. No usable encryption key. Set one in the "
-                            "device's Configure dialog and restart the plugin. "
-                            "Plugin will not retry until then."
+                            "device's Configure dialog and it will reconnect straight away."
                         )
                         self._update_node_status(mac, connected=False, status="Needs encryption key")
                     else:
@@ -1225,7 +1255,10 @@ class Plugin(indigo.PluginBase):
                             "in Indigo — add it and set its API encryption key to use it. "
                             "Ignoring until then."
                         )
-                    self._release_connection(mac)
+                    # Same reasoning as the InvalidAuthAPIError branch above: park it
+                    # so an edited key can wake it, rather than leaving a zombie
+                    # connections entry that blocks every retry path.
+                    self._park_connection(mac, PARK_NEEDS_KEY, failures)
                     return
                 last_error = str(exc)
             except asyncio.CancelledError:
@@ -2734,9 +2767,17 @@ class Plugin(indigo.PluginBase):
     def closedPrefsConfigUi(self, valuesDict, userCancelled):
         if userCancelled:
             return
+        old_default_key             = self.default_encryption_key
         self.default_encryption_key = self._resolve_default_key(valuesDict)
         self.auto_create_nodes      = as_bool(valuesDict.get("autoCreateDevices", True), True)
         self._apply_log_level(valuesDict.get("logLevel", "INFO"))
+
+        # A new default key is the other way a node parked for want of one can
+        # become connectable. Without this the user would have to restart the
+        # plugin after setting it, which is exactly what the parking is meant to
+        # save them.
+        if self.default_encryption_key and self.default_encryption_key != old_default_key:
+            self.retry_nodes_awaiting_key("plugin default encryption key changed")
 
         old_tokens = self.ignored_tokens
         self.ignored_tokens = parse_ignore_list(valuesDict.get("ignoredDevices", ""))

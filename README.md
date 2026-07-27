@@ -29,7 +29,7 @@ with native controls.
 - [Beta Tester Checklist](#beta-tester-checklist)
 - [Companion Plugins](#companion-plugins)
 - [Contributing](#contributing)
-- [License](#license)
+- [Authors & licence](#authors--licence)
 
 ---
 
@@ -216,8 +216,19 @@ walks through flashing it via either USB (esphome web flasher) or OTA.
 
 ## Supported Entity Types
 
-The plugin auto-detects each ESPHome entity from `list_entities_services`
-and creates the matching Indigo device type.
+Since v0.4.0 the plugin creates **one Indigo device per ESPHome node**,
+not one per entity. It reads the node's entity list from
+`list_entities_services` and picks the Indigo device type from the first
+controllable entity it finds, in this order: lock, climate, switch,
+light, fan, cover. That entity becomes the node's **primary** — the one
+Indigo's native on/off, brightness or thermostat controls drive. A node
+with none of them becomes a plain `esphomeNode`.
+
+Every other entity the node reports — sensors, text sensors, binary
+sensors, numbers, selects and buttons — is attached to that same device
+as a state named after the entity. So an energy-metering plug is a
+single Indigo switch carrying voltage, current and power states, rather
+than four separate devices.
 
 ### `esphomeNode` — the ESPHome board itself
 
@@ -250,14 +261,18 @@ relay outputs, GPIO-driven outlets, virtual template switches.
   unparseable as a float)
 - `unit` — pluginProp showing the unit of measurement (V, A, W, °C, etc.)
 
-### `esphomeBinarySensor` — boolean sensor
+### Binary sensors — a state, not a device
 
 **ESPHome class:** `binary_sensor`
-**Indigo class:** `sensor` with `SupportsOnState`
 
-`onOffState` reflects the device class — `motion`, `door`, `window`,
-`occupancy`, `garage_door`, etc. Use as a trigger source like any
-Indigo motion sensor.
+There is no longer an `esphomeBinarySensor` device type. Up to v0.3.x
+each binary sensor became its own Indigo sensor device. Since v0.4.0 it
+arrives as a Boolean on/off state on the node's own device, named after
+the entity — so you build the trigger on that state rather than on a
+device of its own. Numbers, selects and buttons went the same way.
+
+Devices left over from the old model are removed by the one-off v0.4.0
+clean-up.
 
 ### `esphomeLight` — dimmer / CT / RGB light
 
@@ -302,6 +317,42 @@ ESPHome's `supported_color_modes` is decoded automatically:
   `position_action` lambda for position-aware covers; simple
   open/close-only covers also work (Turn On / Off only)
 
+### `esphomeClimate` — thermostat
+
+**ESPHome class:** `climate`
+**Indigo class:** `thermostat`
+
+*Coded but not yet confirmed against real hardware — see
+[Beta Tester Checklist](#beta-tester-checklist).*
+
+- Indigo's native thermostat controls drive it: set the HVAC mode, set
+  the heat or cool setpoint, or nudge either up and down
+- What the node reports back — the temperature it reads, the mode it is
+  in, the `action` it is currently taking and the `preset` it is on
+- The plugin reads the node's own limits and abilities when it creates
+  the device, so the minimum and maximum temperature, the list of modes
+  it accepts, and whether it offers fan modes all come from the
+  hardware rather than a guess
+- A node that keeps a separate low and high target gets the low from
+  the heat setpoint and the high from the cool setpoint. One that keeps
+  a single target takes whichever you set.
+
+### `esphomeLock` — lock
+
+**ESPHome class:** `lock`
+**Indigo class:** `relay` (on = locked, off = unlocked)
+
+*Coded but not yet confirmed against real hardware — see
+[Beta Tester Checklist](#beta-tester-checklist).*
+
+- `Turn On` locks, `Turn Off` unlocks, `Toggle` does the opposite of
+  wherever it is now
+- `lockState` state carries the node's own wording
+- A **Lock - Open (latch release)** action sends ESPHome's `OPEN`
+  command, for locks that can release the latch as well as unlock. The
+  plugin records whether the node claims to support it, and whether it
+  wants a code.
+
 ---
 
 ## Plugin Menu Items
@@ -312,8 +363,36 @@ Available under `Plugins → ESPHome Bridge`:
 |---|---|
 | **Discover ESPHome Devices Now** | Restart the mDNS browser. Any retained advertisements replay. |
 | **List Discovered Devices** | Print a line per discovered node, tagged CONNECTED, ADOPTED, DISCOVERED, PARKED or IGNORED, plus why anything was parked. |
-| **Dump All Entities to Log** | For every connected device, print its full entity list (key, type, name, object_id). Verbose; for debugging. |
+| **Dump All Entities to Log** | For every connected device, print its full entity list (key, type, name, object_id). Verbose, for debugging. |
+| **Upload Firmware (OTA)...** | Flash a compiled `.bin` to a node over the network. See [Firmware upload (OTA)](#firmware-upload-ota) below. |
+| **Toggle Timestamps in Log (on/off)** | Turn the `[HH:MM:SS.mmm]` stamp on each log line on or off. |
 | **Show Plugin Info** | Re-print the startup banner with current device counts and connection status. |
+
+### Firmware upload (OTA)
+
+**Upload Firmware (OTA)...** flashes a node from Indigo, so you don't
+have to go back to the ESPHome dashboard for every change. Pick the
+target from the menu, give it the full path to the `firmware.ota.bin`
+(or `firmware.bin`) that `esphome compile` produced, and click through.
+
+What it does:
+
+- Checks the file is there and looks like firmware before starting. A
+  file under 100 KB is refused — ESPHome builds usually run 600 KB to
+  1.5 MB, so anything smaller is almost certainly the wrong file.
+  Quotes around the path are stripped, so Finder's *Copy as Pathname*
+  can be pasted straight in
+- Closes the plugin's API connection to that node first, so the two
+  aren't fighting over the device mid-flash
+- Uploads to the node's own `/update` endpoint over HTTP — the same
+  route the ESPHome web page uses
+- Runs in the background and reports progress and the outcome to the
+  log, because the upload takes longer than Indigo allows a dialog to
+  sit open
+
+The node reboots itself a second or two after a successful upload, and
+the plugin's normal reconnect picks it back up once it is up. The node
+needs `web_server` in its YAML for the endpoint to exist.
 
 ---
 
@@ -385,7 +464,8 @@ Per-device connection lifecycle:
 1. mDNS discovers `_esphomelib._tcp.local.<mac>`
 2. Plugin opens an `APIClient`, calls `await client.connect(login=True)`
 3. Fetches device info + entity list
-4. Auto-creates Indigo devices (one node + one per entity)
+4. Auto-creates one Indigo device for the node, typed from its primary
+   entity, with every other entity attached as a state
 5. Subscribes to state callbacks
 6. Sleeps in a poll loop; reconnects with exponential backoff on
    disconnect (fresh `APIClient` each attempt — reusing a stale client
@@ -490,11 +570,14 @@ A: The plugin found the device via mDNS but couldn't open the API
    [Troubleshooting](#troubleshooting).
 
 **Q: Can I control entities the plugin doesn't know about?**
-A: Not via the native Indigo controls. The plugin currently supports
-   switch, sensor, text_sensor, binary_sensor, light, fan, and cover
-   entities. Climate, lock, button (as press-trigger), number, and
-   select are not yet implemented. Open an issue if you have hardware
-   for an unsupported entity type.
+A: Most of them, yes. Switch, light, fan, cover, climate and lock
+   entities can be the node's primary and are driven by Indigo's native
+   controls. Sensor, text_sensor and binary_sensor entities arrive as
+   states on the node's device. Number, select and button entities have
+   their own actions (*Set Number Entity Value*, *Set Select Entity
+   Option*, *Press ESPHome Button*) rather than native controls. Climate
+   and lock are coded but not yet confirmed on real hardware. Open an
+   issue if you have hardware for an entity type the plugin misses.
 
 **Q: I moved a device from `ESPHome` to a room folder. Will the
 plugin move it back?**
@@ -519,12 +602,17 @@ here's what would help most:
    Color Levels sets the colour, state changes round-trip back to
    Indigo.
 
-2. **Climate (HVAC) entities** — not yet implemented. If you have
-   an ESPHome thermostat, file an issue with your YAML so we can
-   prioritise.
+2. **Climate (HVAC) entities** — the `esphomeClimate` device type,
+   the thermostat actions and the state mapping are all coded, but I
+   have no ESPHome thermostat to test against. Confirm: the node
+   becomes a thermostat device, the mode and setpoints round-trip, and
+   the temperature it reads shows up.
 
-3. **Lock entities** — not yet implemented. Same deal — file an
-   issue.
+3. **Lock entities** — same story. The `esphomeLock` device type,
+   lock/unlock/toggle and the latch-release action are coded and
+   untested on hardware. Confirm: on means locked, the state
+   round-trips, and *Lock - Open* releases the latch if your lock has
+   one.
 
 4. **BLE proxy devices** — discovery works, connection works, but
    BLE-proxy-specific state surfaces (BLE devices the proxy sees)

@@ -28,6 +28,14 @@ jobs:
       # compileall and ruff say the code parses and lints, which reads as
       # covered while the suite below had never once run on a push. Same fault
       # Dashboards fixed in v2.73.0 and nobody swept.
+      # The plugin's own runtime dependencies. Without them plugin.py cannot be
+      # imported, and the failure does not look like a missing package: two of
+      # these repos' conftests caught it and carried on, so every test reported
+      # "module 'plugin' has no attribute 'Plugin'" instead. Installing them
+      # here also makes CI the first thing that checks requirements.txt is
+      # actually installable.
+      - name: Install plugin dependencies
+        run: pip install -r "ESPHomeBridge.indigoPlugin/Contents/Server Plugin/requirements.txt"
       - name: Contract tests (pytest)
         run: |
           pip install pytest

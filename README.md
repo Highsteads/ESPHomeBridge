@@ -1,5 +1,6 @@
 # ESPHome Bridge — Indigo Plugin
 
+**Version:** 0.8.2 | **Author:** CliveS & Claude | **Platform:** Indigo 2025.2 or later
 Bridges [ESPHome](https://esphome.io/) devices into [Indigo Domotics](https://www.indigodomo.com/)
 2025.2+ as native device types via ESPHome's **Native API** (port 6053).
 

@@ -24,3 +24,11 @@ jobs:
         run: |
           pip install ruff
           ruff check .
+      # The job has been named "tests" since it was created and ran none —
+      # compileall and ruff say the code parses and lints, which reads as
+      # covered while the suite below had never once run on a push. Same fault
+      # Dashboards fixed in v2.73.0 and nobody swept.
+      - name: Contract tests (pytest)
+        run: |
+          pip install pytest
+          python -m pytest tests -q

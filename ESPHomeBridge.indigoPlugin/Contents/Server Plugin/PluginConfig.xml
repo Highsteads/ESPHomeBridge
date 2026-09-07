@@ -11,12 +11,16 @@
 
     <Field id="autoCreateDevices" type="checkbox" defaultValue="true">
         <Label>Auto-create Indigo devices on discovery:</Label>
-        <Description>Untick to keep discovery running without creating anything. Devices you have already added keep working.</Description>
+    </Field>
+    <Field id="label_autoCreateDevices_info" type="label">
+        <Label>Untick to keep discovery running without creating anything. Devices you have already added keep working.</Label>
     </Field>
 
     <Field id="ignoredDevices" type="textfield" defaultValue="">
         <Label>Ignore these devices:</Label>
-        <Description>Comma or space separated MAC addresses, hostnames or IP addresses. Listed devices are never connected to and never warned about — use this for hardware that advertises like an ESPHome node but is not one (a SMLIGHT Zigbee coordinator, for example). The 'List Seen Devices' menu item shows each device's MAC.</Description>
+    </Field>
+    <Field id="label_ignoredDevices_info" type="label">
+        <Label>Comma or space separated MAC addresses, hostnames or IP addresses. Listed devices are never connected to and never warned about — use this for hardware that advertises like an ESPHome node but is not one (a SMLIGHT Zigbee coordinator, for example). The 'List Seen Devices' menu item shows each device's MAC.</Label>
     </Field>
 
     <Field id="sep1" type="separator"/>
@@ -35,7 +39,9 @@
 
     <Field id="defaultEncryptionKey" type="textfield" secure="true" defaultValue="">
         <Label>Default API Encryption Key:</Label>
-        <Description>Base64, from the device's YAML 'api: encryption: key:' line. Leave blank to connect without encryption.</Description>
+    </Field>
+    <Field id="label_defaultEncryptionKey_info" type="label">
+        <Label>Base64, from the device's YAML 'api: encryption: key:' line. Leave blank to connect without encryption.</Label>
     </Field>
 
     <Field id="sep2" type="separator"/>

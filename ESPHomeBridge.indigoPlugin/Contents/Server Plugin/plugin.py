@@ -6,7 +6,7 @@
 #              maps each ESPHome entity to a native Indigo device.
 # Author:      CliveS & Claude Opus 5
 # Date:        22-07-2026
-# Version:     0.8.2
+# Version:     0.8.3
 #
 # v0.8.2 (08-08-2026): REQUIRED Info.plist KEY. `CFBundleURLTypes` was PRESENT but
 # EMPTY, so the plugin shipped without the support URL that becomes its

@@ -110,7 +110,7 @@ except ImportError:
 # ============================================================
 
 PLUGIN_ID      = "com.clives.indigoplugin.esphomebridge"
-PLUGIN_VERSION = "0.8.1"
+PLUGIN_VERSION = "0.8.3"
 
 DEVICE_FOLDER_NAME = "ESPHome"
 

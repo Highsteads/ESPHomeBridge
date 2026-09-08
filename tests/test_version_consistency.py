@@ -143,3 +143,26 @@ def test_required_info_plist_keys_are_present():
     required = {"PluginVersion", "ServerApiVersion", "CFBundleDisplayName",
                 "CFBundleIdentifier", "CFBundleVersion", "CFBundleURLTypes"}
     assert required <= keys, f"missing: {sorted(required - keys)}"
+
+
+def test_cfbundleurltypes_has_the_shape_indigo_accepts():
+    """Presence is not enough — the SHAPE is what Indigo validates.
+
+    CFBundleURLTypes must be an array of dicts keyed CFBundleURLName. Written as a
+    bare string the plist still parses, still contains the key, and still passes a
+    presence check — but Indigo refuses the bundle at install with
+
+        InstallPlugin() caught exception: LowLevelBadParameterError
+
+    which names neither the key nor the file. Cost a failed install on 01-09-2026.
+    """
+    with open(PLIST, "rb") as handle:
+        plist = plistlib.load(handle)
+    entry = plist.get("CFBundleURLTypes")
+    assert isinstance(entry, list), (
+        f"CFBundleURLTypes must be an array, got {type(entry).__name__}")
+    assert entry, "CFBundleURLTypes must not be empty"
+    for item in entry:
+        assert isinstance(item, dict), (
+            f"each CFBundleURLTypes entry must be a dict, got {type(item).__name__}")
+        assert item.get("CFBundleURLName"), "each entry needs a non-empty CFBundleURLName"

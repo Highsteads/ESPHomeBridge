@@ -1,6 +1,6 @@
 # ESPHome Bridge — Indigo Plugin
 
-**Version:** 0.8.3 | **Author:** CliveS & Claude | **Platform:** Indigo 2025.2 or later
+**Version:** 0.8.4 | **Author:** CliveS & Claude | **Platform:** Indigo 2025.2 or later
 Bridges [ESPHome](https://esphome.io/) devices into [Indigo Domotics](https://www.indigodomo.com/)
 2025.2+ as native device types via ESPHome's **Native API** (port 6053).
 
@@ -46,6 +46,8 @@ hardware. Report issues at the
 
 ### Recent changes
 
+
+**v0.8.4** - **The GitHub record inside the bundle now uses the standard spelling.** The plugin bundle carries a small record of where its source lives on GitHub. Ours spelt the two field names its own way, while the plugins Indigo Domotics and the community publish spell them `GithubUser` and `GithubRepo`. It now matches them. Nothing else changed.
 
 **v0.8.3** - **The settings dialog was stretched wider than its own window, so the help text beside each setting was cut off mid-sentence.** The short help that can be attached to a setting is drawn on a single line and never wraps, so the longest one decides how wide every row is — and the window cannot be widened past a fixed maximum. All three long ones have moved into ordinary description paragraphs, which do wrap. Two new checks fail the build if any help text or setting label grows long enough to do it again. No setting or behaviour changed.
 **v0.8.2** — **Added the missing support link.** Every Indigo plugin is meant to carry a web address inside its bundle — it is what the "About" item in the Plugins menu opens. This one had the entry but left it blank, so that menu item went nowhere. It now points at this repository. Nothing else changed.

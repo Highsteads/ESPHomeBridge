@@ -17,15 +17,15 @@
 	<string>1.0.0</string>
 	<key>GithubInfo</key>
 	<dict>
-		<key>Owner</key>
-		<string>Highsteads</string>
-		<key>Repo</key>
+		<key>GithubRepo</key>
 		<string>ESPHomeBridge</string>
+		<key>GithubUser</key>
+		<string>Highsteads</string>
 	</dict>
 	<key>IwsApiVersion</key>
 	<string>1.0.0</string>
 	<key>PluginVersion</key>
-	<string>0.8.3</string>
+	<string>0.8.4</string>
 	<key>ServerApiVersion</key>
 	<string>3.0</string>
 </dict>

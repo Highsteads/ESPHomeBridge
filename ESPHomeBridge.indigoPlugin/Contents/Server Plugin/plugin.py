@@ -4,9 +4,9 @@
 # Description: Indigo bridge for ESPHome devices via the Native API (port 6053).
 #              Auto-discovers via mDNS, connects per device via aioesphomeapi,
 #              maps each ESPHome entity to a native Indigo device.
-# Author:      CliveS & Claude Opus 5
-# Date:        22-07-2026
-# Version:     0.8.3
+# Author:      CliveS & Claude Fable 5.1
+# Date:        11-09-2026
+# Version:     0.8.4
 #
 # v0.8.2 (08-08-2026): REQUIRED Info.plist KEY. `CFBundleURLTypes` was PRESENT but
 # EMPTY, so the plugin shipped without the support URL that becomes its
@@ -110,7 +110,7 @@ except ImportError:
 # ============================================================
 
 PLUGIN_ID      = "com.clives.indigoplugin.esphomebridge"
-PLUGIN_VERSION = "0.8.3"
+PLUGIN_VERSION = "0.8.4"
 
 DEVICE_FOLDER_NAME = "ESPHome"
 

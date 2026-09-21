@@ -36,8 +36,8 @@ def test_parse_mac_notations_normalise(plugin_mod):
 
 
 def test_parse_ip_is_not_mistaken_for_mac(plugin_mod):
-    # 192.168.100.172 strips to 12 hex-ish chars — it must stay an IP token.
-    assert plugin_mod.parse_ignore_list("192.168.100.172") == {"192.168.100.172"}
+    # 192.168.1.200 strips to 12 hex-ish chars — it must stay an IP token.
+    assert plugin_mod.parse_ignore_list("192.168.1.200") == {"192.168.1.200"}
 
 
 def test_parse_hostname_lowercased_and_local_stripped(plugin_mod):

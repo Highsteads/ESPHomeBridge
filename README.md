@@ -1,6 +1,6 @@
 # ESPHome Bridge — Indigo Plugin
 
-**Version:** 0.8.5 | **Author:** CliveS & Claude | **Platform:** Indigo 2025.2 or later
+**Version:** 0.9.0 | **Author:** CliveS & Claude | **Platform:** Indigo 2025.2 or later
 Bridges [ESPHome](https://esphome.io/) devices into [Indigo Domotics](https://www.indigodomo.com/)
 2025.2+ as native device types via ESPHome's **Native API** (port 6053).
 
@@ -36,7 +36,7 @@ with native controls.
 
 ## Status
 
-**Public beta (v0.8.x).** Validated end-to-end on Athom plugs and a
+**Public beta (v0.9.x).** Validated end-to-end on Athom plugs and a
 custom ESP32 test rig running ESPHome 2026.4.x. Switch, dimmer, fan
 (with variable speed), cover (with position) and sensor entity types
 all confirmed working round-trip. RGB lights, climate, lock, and BLE
@@ -46,6 +46,8 @@ hardware. Report issues at the
 
 ### Recent changes
 
+
+**v0.9.0** - **Voltage readings are only recorded when the mains actually moves.** A power-monitoring plug reports the mains voltage every few seconds, and it wobbles by a few hundredths of a volt all the time, so every report was a new reading - about 40,000 rows a day in SQL Logger's history from two freezer plugs. There is a new setting, **Ignore voltage changes smaller than (V)**, set to 0.5 V to start with. A smaller change is not recorded, while a real rise or fall, or a slow drift that adds up to half a volt, still is. Set it to 0 to record every reading as before. Power, current and energy are not affected.
 
 **v0.8.5** - **ESPHome devices no longer fill SQL Logger's history with a row every couple of seconds.** The plugin records when it last heard from each device, and that time changes on almost every message, so SQL Logger was saving a whole history row each time - over 4 million rows for one smart plug in three months. The plugin now tells SQL Logger to skip that time, the uptime and the two WiFi signal readings for its devices. Anything you already told SQL Logger to skip is kept, and a device you set to skip entirely stays that way. Readings such as power, voltage and energy are logged exactly as before, and existing history is untouched.
 
@@ -169,6 +171,7 @@ This takes ~30 seconds on the first run; instant thereafter.
 |---|---|
 | **Auto-create Indigo devices on discovery** | When a new ESPHome device is discovered, automatically create the matching Indigo node device. Default on. |
 | **Ignore these devices** | MAC addresses, hostnames or IP addresses (comma or space separated) the plugin should never connect to or warn about. For hardware that advertises like an ESPHome node but is not one — a SMLIGHT Zigbee coordinator, for example. The List Discovered Devices menu item shows each node's MAC. |
+| **Ignore voltage changes smaller than (V)** | Mains voltage wobbles by hundredths of a volt; a change smaller than this is not written to a voltage sensor, so its history records real moves. Measured from the last value written, so a slow drift still lands. Default 0.5; 0 records every reading. |
 | **Default API Encryption Key** | Base64 key from your YAML's `api: encryption: key:` line. Used for any device with no key of its own. Leave blank for unencrypted devices. Read from `IndigoSecrets.py` (`ESPHOME_DEFAULT_ENCRYPTION_KEY`) first if you keep one — this field is the fallback. |
 | **Log Level** | Standard Indigo log levels. |
 

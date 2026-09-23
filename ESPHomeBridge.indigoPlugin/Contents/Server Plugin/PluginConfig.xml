@@ -44,6 +44,19 @@
         <Label>Base64, from the device's YAML 'api: encryption: key:' line. Leave blank to connect without encryption.</Label>
     </Field>
 
+    <Field id="sep_history" type="separator"/>
+
+    <Field id="historyHeader" type="label">
+        <Label>Voltage Readings</Label>
+    </Field>
+
+    <Field id="voltageDeadband" type="textfield" defaultValue="0.5">
+        <Label>Ignore voltage changes smaller than (V):</Label>
+    </Field>
+    <Field id="label_voltageDeadband_info" type="label">
+        <Label>Mains voltage wobbles by a few hundredths of a volt all the time, and each wobble is a new reading - several a minute on a power-monitoring plug, and a row in SQL Logger's history for each. A change smaller than this is not recorded, so the voltage state moves when the mains really moves. Set 0 to record every reading.</Label>
+    </Field>
+
     <Field id="sep2" type="separator"/>
 
     <Field id="loggingHeader" type="label">

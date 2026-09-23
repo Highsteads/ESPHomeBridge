@@ -4,9 +4,17 @@
 # Description: Indigo bridge for ESPHome devices via the Native API (port 6053).
 #              Auto-discovers via mDNS, connects per device via aioesphomeapi,
 #              maps each ESPHome entity to a native Indigo device.
-# Author:      CliveS & Claude Fable 5.1; Claude Opus 5.5 (0.8.5)
+# Author:      CliveS & Claude Fable 5.1; Claude Opus 5.5 (0.8.5-0.9.0)
 # Date:        23-09-2026
-# Version:     0.8.5
+# Version:     0.9.0
+#
+# v0.9.0 (23-09-2026): VOLTAGE DEADBAND. A power-monitoring plug reports mains
+# voltage every few seconds and it wobbles by hundredths of a volt, so every report
+# was a new value: the two freezer plugs wrote ~40,000 SQL Logger rows a day for
+# voltage alone. A secondary sensor in volts is now only written when it moves by
+# at least the new "Ignore voltage changes smaller than (V)" setting (default
+# 0.5 V; 0 records every reading). The comparison is against the value last
+# WRITTEN, so a slow drift still lands once it adds up to the deadband.
 #
 # v0.8.5 (23-09-2026): KEEP THE CHURN OUT OF SQL LOGGER. `lastSeen` is rewritten on
 # every packet a node sends, so SQL Logger stored a history row every couple of
@@ -121,7 +129,7 @@ except ImportError:
 # ============================================================
 
 PLUGIN_ID      = "com.clives.indigoplugin.esphomebridge"
-PLUGIN_VERSION = "0.8.5"
+PLUGIN_VERSION = "0.9.0"
 
 DEVICE_FOLDER_NAME = "ESPHome"
 
@@ -129,6 +137,35 @@ DEVICE_FOLDER_NAME = "ESPHome"
 # keeping. SQL Logger reads the comma-separated `sqlLoggerIgnoreStates` shared
 # prop (case-insensitive) and skips these columns; a ".ui" twin is a separate
 # state as far as SQL Logger is concerned, so it is listed too.
+# v0.9.0: default for the "Ignore voltage changes smaller than" setting.
+DEFAULT_VOLTAGE_DEADBAND = 0.5
+
+
+def parse_deadband(value, default=DEFAULT_VOLTAGE_DEADBAND):
+    """A non-negative float from a prefs value, or `default` when it is blank,
+    unreadable or negative. 0 is valid and means "record every reading"."""
+    try:
+        v = float(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(v) or v < 0:
+        return default
+    return v
+
+
+def within_deadband(previous, new, deadband):
+    """True when `new` differs from the last written `previous` by less than
+    `deadband` -- i.e. the write can be skipped. A missing or non-numeric
+    previous value never counts as within the band. A deadband of 0 needs no
+    special case: no change is smaller than nothing."""
+    if isinstance(previous, bool):
+        return False
+    try:
+        return abs(float(new) - float(previous)) < deadband
+    except (TypeError, ValueError):
+        return False
+
+
 SQL_LOGGER_CHURN_STATES = (
     "lastSeen", "uptime",
     "wifiSignalDb", "wifiSignalDb.ui",
@@ -413,6 +450,7 @@ class Plugin(indigo.PluginBase):
 
         # Config
         self.auto_create_nodes = as_bool(pluginPrefs.get("autoCreateDevices", True), True)
+        self.voltage_deadband  = parse_deadband(pluginPrefs.get("voltageDeadband", DEFAULT_VOLTAGE_DEADBAND))
         self.default_encryption_key = self._resolve_default_key(pluginPrefs)
 
         # Never probe these: MACs / hostnames / IPs from the Configure dialog.
@@ -1492,6 +1530,10 @@ class Plugin(indigo.PluginBase):
                     # 33.59825134277344) the raw itself has to be rounded.
                     val = round(raw, 2)
                     ui  = f"{val:.2f} {unit}".rstrip() if unit else f"{val:.2f}"
+                    if unit == "V" and within_deadband(
+                            dev.states.get(state_id), val,
+                            getattr(self, "voltage_deadband", DEFAULT_VOLTAGE_DEADBAND)):
+                        return          # v0.9.0: mains wobble, not a change
                 dev.updateStateOnServer(state_id, val, uiValue=ui)
             except (TypeError, ValueError):
                 dev.updateStateOnServer(state_id, str(state.state))
@@ -2825,12 +2867,28 @@ class Plugin(indigo.PluginBase):
     # PluginPrefs
     # --------------------------------------------------------
 
+    def validatePrefsConfigUi(self, valuesDict):
+        """v0.9.0: the voltage deadband must be a number of volts, 0 or more."""
+        errors = indigo.Dict()
+        raw = str(valuesDict.get("voltageDeadband", "")).strip()
+        try:
+            v = float(raw)
+            ok = math.isfinite(v) and v >= 0
+        except ValueError:
+            ok = False
+        if not ok:
+            errors["voltageDeadband"] = ("Enter a number of volts, 0 or more "
+                                         "(0 records every reading).")
+            return (False, valuesDict, errors)
+        return (True, valuesDict)
+
     def closedPrefsConfigUi(self, valuesDict, userCancelled):
         if userCancelled:
             return
         old_default_key             = self.default_encryption_key
         self.default_encryption_key = self._resolve_default_key(valuesDict)
         self.auto_create_nodes      = as_bool(valuesDict.get("autoCreateDevices", True), True)
+        self.voltage_deadband       = parse_deadband(valuesDict.get("voltageDeadband", DEFAULT_VOLTAGE_DEADBAND))
         self._apply_log_level(valuesDict.get("logLevel", "INFO"))
 
         # A new default key is the other way a node parked for want of one can

@@ -43,6 +43,8 @@ class FakeDevice:
         self.deviceTypeId  = device_type_id
         self.pluginProps   = dict(props or {})
         self.ownerProps    = self.pluginProps
+        self.sharedProps   = {}
+        self.shared_writes = 0
         self.states        = dict(states or {})
         self.state_writes  = []       # ordered audit of every write
         self.subModel      = ""
@@ -71,6 +73,10 @@ class FakeDevice:
     def replacePluginPropsOnServer(self, props):
         self.pluginProps = dict(props)
         self.ownerProps  = self.pluginProps
+
+    def replaceSharedPropsOnServer(self, props):
+        self.sharedProps = dict(props)
+        self.shared_writes += 1
 
     def replaceOnServer(self):
         pass

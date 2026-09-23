@@ -1,6 +1,6 @@
 # ESPHome Bridge — Indigo Plugin
 
-**Version:** 0.8.4 | **Author:** CliveS & Claude | **Platform:** Indigo 2025.2 or later
+**Version:** 0.8.5 | **Author:** CliveS & Claude | **Platform:** Indigo 2025.2 or later
 Bridges [ESPHome](https://esphome.io/) devices into [Indigo Domotics](https://www.indigodomo.com/)
 2025.2+ as native device types via ESPHome's **Native API** (port 6053).
 
@@ -46,6 +46,8 @@ hardware. Report issues at the
 
 ### Recent changes
 
+
+**v0.8.5** - **ESPHome devices no longer fill SQL Logger's history with a row every couple of seconds.** The plugin records when it last heard from each device, and that time changes on almost every message, so SQL Logger was saving a whole history row each time - over 4 million rows for one smart plug in three months. The plugin now tells SQL Logger to skip that time, the uptime and the two WiFi signal readings for its devices. Anything you already told SQL Logger to skip is kept, and a device you set to skip entirely stays that way. Readings such as power, voltage and energy are logged exactly as before, and existing history is untouched.
 
 **v0.8.4** - **The GitHub record inside the bundle now uses the standard spelling.** The plugin bundle carries a small record of where its source lives on GitHub. Ours spelt the two field names its own way, while the plugins Indigo Domotics and the community publish spell them `GithubUser` and `GithubRepo`. It now matches them. Nothing else changed.
 

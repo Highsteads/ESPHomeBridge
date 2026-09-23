@@ -4,9 +4,20 @@
 # Description: Indigo bridge for ESPHome devices via the Native API (port 6053).
 #              Auto-discovers via mDNS, connects per device via aioesphomeapi,
 #              maps each ESPHome entity to a native Indigo device.
-# Author:      CliveS & Claude Fable 5.1
-# Date:        11-09-2026
-# Version:     0.8.4
+# Author:      CliveS & Claude Fable 5.1; Claude Opus 5.5 (0.8.5)
+# Date:        23-09-2026
+# Version:     0.8.5
+#
+# v0.8.5 (23-09-2026): KEEP THE CHURN OUT OF SQL LOGGER. `lastSeen` is rewritten on
+# every packet a node sends, so SQL Logger stored a history row every couple of
+# seconds: the two freezer plugs reached 4.3 and 4.1 million rows in three months
+# (~45,000 a day each), nearly all of them lastSeen alone. That made SQL Logger's
+# daily prune scan each table for ~9 s while holding its single DB lock, and any
+# other history write that waited more than 4 s was silently dropped (22-09-2026
+# investigation). deviceStartComm now adds lastSeen, uptime and the two WiFi
+# signal states (and their .ui twins) to the device's `sqlLoggerIgnoreStates`
+# shared prop -- merged into anything the user already listed, never replacing
+# it, and left alone when the user has set "*". Existing rows are untouched.
 #
 # v0.8.2 (08-08-2026): REQUIRED Info.plist KEY. `CFBundleURLTypes` was PRESENT but
 # EMPTY, so the plugin shipped without the support URL that becomes its
@@ -110,9 +121,35 @@ except ImportError:
 # ============================================================
 
 PLUGIN_ID      = "com.clives.indigoplugin.esphomebridge"
-PLUGIN_VERSION = "0.8.4"
+PLUGIN_VERSION = "0.8.5"
 
 DEVICE_FOLDER_NAME = "ESPHome"
+
+# v0.8.5: states that change on almost every packet and carry no history worth
+# keeping. SQL Logger reads the comma-separated `sqlLoggerIgnoreStates` shared
+# prop (case-insensitive) and skips these columns; a ".ui" twin is a separate
+# state as far as SQL Logger is concerned, so it is listed too.
+SQL_LOGGER_CHURN_STATES = (
+    "lastSeen", "uptime",
+    "wifiSignalDb", "wifiSignalDb.ui",
+    "wifiSignalPercent", "wifiSignalPercent.ui",
+)
+
+
+def merge_sql_logger_ignore(existing, extra=SQL_LOGGER_CHURN_STATES):
+    """Return the new sqlLoggerIgnoreStates value, or None when nothing changes.
+
+    Keeps every entry the user already listed, in their order, and appends the
+    missing churn states. "*" (ignore the whole device) is left as it is.
+    """
+    current = [t.strip() for t in str(existing or "").split(",") if t.strip()]
+    if len(current) == 1 and current[0] == "*":
+        return None
+    have = {t.lower() for t in current}
+    missing = [t for t in extra if t.lower() not in have]
+    if not missing:
+        return None
+    return ", ".join(current + missing)
 
 # How often the mDNS browser re-broadcasts (it's continuous between)
 MDNS_SERVICE_TYPE = "_esphomelib._tcp.local."
@@ -2745,11 +2782,27 @@ class Plugin(indigo.PluginBase):
         # (one per ESPHome node).
         if dev.deviceTypeId in self._OUR_DEVICE_TYPES:
             self.nodes_by_mac[dev.address] = dev
+            self._keep_churn_out_of_sql_logger(dev)
             # Adding (or re-enabling) a device for a parked node is the clearest
             # possible signal that the user wants it connected — try again now
             # rather than making them restart the plugin.
             if dev.address in self.parked:
                 self.request_retry(dev.address, "device added or re-enabled in Indigo")
+
+    def _keep_churn_out_of_sql_logger(self, dev):
+        """v0.8.5: see SQL_LOGGER_CHURN_STATES. Writes only when something is
+        missing, so a restart re-checks every device without rewriting it."""
+        try:
+            shared = dev.sharedProps
+            merged = merge_sql_logger_ignore(shared.get("sqlLoggerIgnoreStates", ""))
+            if merged is None:
+                return
+            shared["sqlLoggerIgnoreStates"] = merged
+            dev.replaceSharedPropsOnServer(shared)
+            self.logger.debug(f"{dev.name}: SQL Logger now skips {merged}")
+        except Exception as exc:
+            self.logger.warning(f"{dev.name}: could not set the SQL Logger ignore "
+                                f"list ({exc}); history keeps logging every packet")
 
     def deviceStopComm(self, dev):
         if dev.deviceTypeId in self._OUR_DEVICE_TYPES:

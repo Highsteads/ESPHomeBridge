@@ -2,7 +2,7 @@
 
 **Bring your ESPHome plugs, lights and sensors into Indigo, found by themselves and talked to directly over your home network.**
 
-**Version:** 0.9.0 | **Author:** CliveS & Claude | **Needs:** Indigo 2025.2 or later
+**Version:** 0.10.0 | **Author:** CliveS & Claude | **Needs:** Indigo 2025.2 or later
 
 **[Read the full guide](https://highsteads.github.io/ESPHomeBridge/)** — setting up, what everything means, and what to do when something goes wrong.
 
@@ -54,9 +54,9 @@ The [full guide](https://highsteads.github.io/ESPHomeBridge/) goes through each 
 
 ## What's new
 
-**v0.9.0** — Voltage readings are only recorded when the mains actually moves. The new setting **Ignore voltage changes smaller than (V)** is 0.5 to start with, so the constant wobble of a few hundredths of a volt no longer adds a row to SQL Logger's history every few seconds, while a real rise or fall, or a slow drift that adds up to half a volt, is still recorded. Set it to 0 to record every reading.
+**v0.10.0** — **Connected** and **Status** now tell the truth when **Auto-create Indigo devices on discovery** is unticked, and are put right each time the plugin starts. **Toggle** works on a blind, **Send Status Request** works on switches, lights, fans, blinds and locks, changing a light's white temperature no longer turns it black, and each light now gets the colour and white-temperature controls it can really use.
 
-**v0.8.5** — ESPHome devices no longer fill SQL Logger's history with a row every couple of seconds. The plugin tells SQL Logger to skip the last-heard time, the uptime and the two Wi-Fi signal readings, keeping anything you already told it to skip.
+**v0.9.0** — Voltage readings are only recorded when the mains actually moves. The new setting **Ignore voltage changes smaller than (V)** is 0.5 to start with, so the constant wobble of a few hundredths of a volt no longer adds a row to SQL Logger's history every few seconds, while a real rise or fall, or a slow drift that adds up to half a volt, is still recorded. Set it to 0 to record every reading.
 
 Every version is listed in the [version history](https://highsteads.github.io/ESPHomeBridge/changelog.html).
 

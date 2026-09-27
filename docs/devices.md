@@ -15,10 +15,12 @@ A device with nothing to control but with readings becomes an **ESPHome Sensor N
 
 | Shown as | What it means |
 |---|---|
-| **Connected** | True while the plugin has a working connection to the device. |
+| **Connected** | True while the plugin has a working connection to the device. It is set afresh when the plugin starts, whether or not **Auto-create Indigo devices on discovery** is ticked. |
 | **Status** | **Online**, **Disconnected**, **Needs encryption key** or **Bad key**. The [When something goes wrong](troubleshooting.md) page explains the last two. |
 | **Last Seen** | The date and time of the last reading the device sent, such as `2026-09-27T09:15:04`. |
 | **ipAddress**, **macAddress**, **boardModel**, **esphomeVersion** | The device's network address, its MAC address (a number every network device is made with), the board it runs on, and the version of ESPHome on it. If the device already offers a reading with one of these names, that reading is used instead. |
+
+**Send Status Request** on a switch, light, fan, blind or lock writes the latest readings the device has sent back into Indigo. ESPHome devices send every change as it happens, so Indigo is normally up to date already, and this writes the readings again. If the plugin has no connection to the device, the Event Log says so and **Connected** and **Status** are set to match.
 
 ## Everything else the device offers
 
@@ -50,7 +52,11 @@ For a device whose main job is a light. **Turn On**, **Turn Off**, **Toggle**, *
 |---|---|
 | Brightness | The light's brightness from 0 to 100, and 0 when it is off. |
 | **Color Temp** | The colour temperature the light reports, if it has one. |
-| Red, green and blue levels | For a colour light, the colour it is set to. **Set Color Levels** sets the colour. |
+| Red, green and blue levels | For a colour light, the colour it is set to. |
+
+Indigo shows the colour controls the light can use: a colour picker for a colour light, a white level for one with a separate white channel, and a white-temperature slider for one that changes its shade of white. A light with separate cold and warm white LEDs gets the slider once it has told the plugin its warmest and coolest shades.
+
+**Set Color Levels** sends only the levels you give it. Change the red level alone and green and blue stay as they are. Change the white temperature and the light moves to that shade of white, without touching the colour.
 
 ## ESPHome Fan Node
 
@@ -64,11 +70,9 @@ For a fan. Indigo shows it as a dimmer, with the brightness standing for the fan
 
 For a blind, shutter, curtain or garage door — ESPHome calls all of these a **cover**. Indigo shows it as a dimmer, with the brightness standing for how far open it is: 0 is closed and 100 is fully open.
 
-- **Turn On** opens it fully and **Turn Off** closes it.
+- **Turn On** opens it fully and **Turn Off** closes it. **Toggle** closes it if it is open at all, and opens it fully if it is closed.
 - **Set Brightness**, **Brighten By** and **Dim By** move it to a position, if the cover can go to a position.
 - **Operation** shows **idle**, **opening** or **closing**.
-
-**Toggle** does nothing on a cover.
 
 ## ESPHome Climate Node
 

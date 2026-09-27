@@ -7,7 +7,7 @@ nav_order: 5
 
 ## Indigo's usual controls
 
-Each device answers the controls Indigo gives its kind of device — **Turn On**, **Turn Off** and **Toggle** for a switch or lock, brightness for a light, fan or blind, and the thermostat controls for a thermostat — wherever you use them: the device list, a control page, a schedule, a trigger or an action group. The [Your devices](devices.md) page says what each one does on each kind of device.
+Each device answers the controls Indigo gives its kind of device — **Turn On**, **Turn Off** and **Toggle** for a switch, light, fan, blind or lock, brightness for a light, fan or blind, **Send Status Request** for any of those five, and the thermostat controls for a thermostat — wherever you use them: the device list, a control page, a schedule, a trigger or an action group. The [Your devices](devices.md) page says what each one does on each kind of device.
 
 If the plugin has no connection to the device when you use one, the command is not sent, and the Event Log says there is no active connection.
 

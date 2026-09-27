@@ -36,6 +36,8 @@ The plugin has tried to connect ten times in a row, or three for a device that i
 
 The plugin has lost its connection to the device and is trying again, with a longer gap each time up to five minutes. Check the device has power and Wi-Fi. When it answers, the plugin reconnects by itself.
 
+Straight after the plugin starts, every device shows **Disconnected** for a few seconds until the plugin has reached it.
+
 ## A device came back as a new Indigo device
 
 New firmware changed what kind of device it should be, so the plugin replaced the old Indigo device with one of the right kind, back in the **ESPHome** folder. Move and rename it as you like, and point any triggers, action groups and control pages that used the old device at the new one. The [How it works](how-it-works.md) page explains why.

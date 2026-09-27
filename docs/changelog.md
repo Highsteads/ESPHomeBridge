@@ -7,6 +7,20 @@ nav_order: 9
 
 The newest version is at the top.
 
+## 0.10.0 — 27 September 2026
+
+**Connected and Status now tell the truth whichever way auto-create is set.** With **Auto-create Indigo devices on discovery** unticked, a device you had made yourself never showed **Online**, even while it was working perfectly. It does now, and every device's **Connected** and **Status** are put right when the plugin starts, rather than carrying on from before.
+
+**Toggle works on a blind.** It closes a blind that is open at all, and opens one that is closed. It did nothing before.
+
+**Send Status Request works on switches, lights, fans, blinds and locks.** It writes the latest readings the device has sent back into Indigo, or says in the Event Log that there is no connection. It did nothing before.
+
+**Changing a light's white temperature no longer turns it black.** The plugin sent the colour as black with it, and never sent the temperature at all. **Set Color Levels** now sends only the levels you give it, so changing the red alone leaves green and blue as they were.
+
+**Lights get the right controls in Indigo.** A bulb that does both colour and white temperature had no white-temperature slider, and a light with separate cold and warm white LEDs was given a colour picker it cannot use. The plugin now reads what each light can really do, and a cold and warm white light gets a white-temperature slider once it has told the plugin its warmest and coolest shades. The change reaches each light the next time the plugin connects to it.
+
+The help beside **Ignore these devices** now calls the menu item by its real name, **List Discovered Devices**.
+
 ## 0.9.0 — 23 September 2026
 
 **Voltage readings are only recorded when the mains actually moves.** A power-monitoring plug reports the mains voltage every few seconds, and it wobbles by a few hundredths of a volt all the time, so every report was a new reading — about 40,000 rows a day in SQL Logger's history from two freezer plugs. The new setting **Ignore voltage changes smaller than (V)** is 0.5 to start with. A smaller change is not recorded, while a real rise or fall, or a slow drift that adds up to half a volt, still is. Set it to 0 to record every reading as before. Power, current and energy are not affected.

@@ -4,9 +4,20 @@
 # Description: Indigo bridge for ESPHome devices via the Native API (port 6053).
 #              Auto-discovers via mDNS, connects per device via aioesphomeapi,
 #              maps each ESPHome entity to a native Indigo device.
-# Author:      CliveS & Claude Fable 5.1; Claude Opus 5.5 (0.8.5-0.9.0)
-# Date:        23-09-2026
-# Version:     0.9.0
+# Author:      CliveS & Claude Fable 5.1; Claude Opus 5.5 (0.8.5-0.10.0)
+# Date:        27-09-2026
+# Version:     0.10.0
+#
+# v0.10.0 (27-09-2026): FAULTS FOUND WRITING THE GUIDE. Connected/Status now follow
+# the connection with auto-create off too (a hand-made device never went Online) and
+# are set afresh in deviceStartComm. Status Request re-writes each entity's last
+# state (cached per connection) on switch/light/fan/cover/lock. Toggle works on a
+# cover. Set Color Levels sends only the channels supplied (light_colour_kwargs):
+# a colour-temperature change used to send rgb (0,0,0) and no temperature. The
+# ignore-list help names the menu item by its real name, List Discovered Devices.
+# Light colour props now come from ESPHome's capability bits (light_capability_props):
+# `m >= 19` counted cold/warm-white lights as RGB, and `27 in modes` never matched,
+# so an RGB + colour-temperature bulb (mode 47) had no temperature slider.
 #
 # v0.9.0 (23-09-2026): VOLTAGE DEADBAND. A power-monitoring plug reports mains
 # voltage every few seconds and it wobbles by hundredths of a volt, so every report
@@ -39,7 +50,7 @@
 # (MACs, hostnames or IPs, comma/space separated) for hardware that advertises
 # _esphomelib._tcp but is not an ESPHome node — the SMLIGHT SMHUB/SLZB boxes
 # being the live case. Ignored devices are never probed, parked or warned
-# about, show as [IGNORED] in List Seen Devices, and a prefs change takes
+# about, show as [IGNORED] in List Discovered Devices, and a prefs change takes
 # effect immediately (parked entries dropped, live retry loops ended).
 #
 # v0.7.1 (21-07-2026): shared plugin_utils.py refreshed to v1.3 — the
@@ -129,7 +140,7 @@ except ImportError:
 # ============================================================
 
 PLUGIN_ID      = "com.clives.indigoplugin.esphomebridge"
-PLUGIN_VERSION = "0.9.0"
+PLUGIN_VERSION = "0.10.0"
 
 DEVICE_FOLDER_NAME = "ESPHome"
 
@@ -232,6 +243,91 @@ _LOG_LEVELS = {
     "ERROR":   logging.ERROR,
     "CRITICAL": logging.CRITICAL,
 }
+
+
+def _level_from(values, channel, fallback=0.0):
+    """One colour channel (0-100) as a float, or `fallback` if absent/unreadable."""
+    try:
+        return float(values[channel])
+    except (KeyError, TypeError, ValueError):
+        return fallback
+
+
+def light_colour_kwargs(action_value, cached_states):
+    """Turn Indigo's Set Color Levels actionValue into light_command arguments.
+
+    Every channel in actionValue is optional: a colour-temperature change
+    carries only whiteTemperature (and perhaps whiteLevel). Reading the absent
+    red/green/blue as 0 sent the light black and never sent the temperature.
+    So only the channels supplied are sent, and a partial RGB change fills the
+    other two from the device's current levels.
+
+    Returns {} when nothing usable is present.
+    """
+    values = action_value or {}
+    cached = cached_states or {}
+    out = {}
+    rgb_keys = ("redLevel", "greenLevel", "blueLevel")
+    if any(k in values for k in rgb_keys):
+        out["rgb"] = tuple(
+            max(0.0, min(100.0, _level_from(values, k, _level_from(cached, k)))) / 100.0
+            for k in rgb_keys
+        )
+    if "whiteLevel" in values:
+        white = _level_from(values, "whiteLevel", -1.0)
+        if white >= 0:
+            out["white"] = min(100.0, white) / 100.0
+    if "whiteTemperature" in values:
+        kelvin = _level_from(values, "whiteTemperature", 0.0)
+        if kelvin > 0:
+            # ESPHome takes colour temperature in mireds (1,000,000 / kelvin)
+            out["color_temperature"] = 1_000_000.0 / kelvin
+    return out
+
+
+# ESPHome colour modes are bit sets of these capabilities (aioesphomeapi
+# LightColorCapability): RGB_COLOR_TEMPERATURE is 47 = RGB | COLOR_TEMPERATURE
+# | WHITE | BRIGHTNESS | ON_OFF. Kept here rather than imported so the helper
+# works wherever aioesphomeapi is stubbed; a test pins them to the library.
+CAP_WHITE             = 4
+CAP_COLOR_TEMPERATURE = 8
+CAP_COLD_WARM_WHITE   = 16
+CAP_RGB               = 32
+
+
+def light_capability_props(modes, min_mireds=0, max_mireds=0):
+    """Indigo colour props for an ESPHome light, from its supported colour modes.
+
+    Indigo nests them: SupportsRGB and SupportsWhite need SupportsColor, and
+    SupportsWhiteTemperature needs SupportsWhite. A cold/warm-white light takes
+    a colour temperature too (ESPHome converts it) once it knows its mired
+    range, so it gets the temperature slider only when both ends are known.
+    """
+    bits = 0
+    for m in modes or []:
+        try:
+            bits |= int(m)
+        except (TypeError, ValueError):
+            continue
+    try:
+        lo, hi = float(min_mireds or 0), float(max_mireds or 0)
+    except (TypeError, ValueError):
+        lo, hi = 0.0, 0.0
+    has_range = lo > 0 and hi > lo
+    rgb   = bool(bits & CAP_RGB)
+    temp  = bool(bits & CAP_COLOR_TEMPERATURE) or (bool(bits & CAP_COLD_WARM_WHITE) and has_range)
+    white = bool(bits & CAP_WHITE) or temp
+    props = {
+        "SupportsColor":            rgb or white,
+        "SupportsRGB":              rgb,
+        "SupportsWhite":            white,
+        "SupportsWhiteTemperature": temp,
+    }
+    if temp and has_range:
+        # Warmest (most mireds) to coolest (fewest), as kelvin
+        props["WhiteTemperatureMin"] = str(int(round(1_000_000 / hi)))
+        props["WhiteTemperatureMax"] = str(int(round(1_000_000 / lo)))
+    return props
 
 
 def _lvl(level):
@@ -1045,7 +1141,7 @@ class Plugin(indigo.PluginBase):
 
         if self._is_ignored(mac, hostname=hostname, ip=ip):
             # On the Configure dialog's ignore list: keep the discovery details
-            # so List Seen Devices can show it, but never probe, park or warn.
+            # so List Discovered Devices can show it, but never probe, park or warn.
             self.parked.pop(mac, None)
             if is_new:
                 self.logger.debug(
@@ -1213,7 +1309,9 @@ class Plugin(indigo.PluginBase):
         if self._is_ignored(mac):
             return
 
-        self.connections[mac] = {"client": None, "info": None, "entities": {}}
+        # "states" holds the last state object each entity sent (entity key ->
+        # state), so a Status Request can re-write them without re-subscribing.
+        self.connections[mac] = {"client": None, "info": None, "entities": {}, "states": {}}
         self.parked.pop(mac, None)
         backoff    = RECONNECT_BACKOFF_INITIAL
         was_online = False
@@ -1261,6 +1359,11 @@ class Plugin(indigo.PluginBase):
                 # by entity_key. No per-entity device creation any more.
                 if self.auto_create_nodes:
                     self._ensure_node_device(mac, device_info, entities)
+                else:
+                    # _ensure_node_device is what marks the device Online, so
+                    # with auto-create off a device the user made by hand sat
+                    # at its old Connected/Status for as long as it was up.
+                    self._update_node_status(mac, connected=True, status="Online")
                 self._fire_event("deviceOnline", mac)
 
                 # subscribe_states is SYNCHRONOUS in aioesphomeapi (takes a
@@ -1425,6 +1528,9 @@ class Plugin(indigo.PluginBase):
         key = getattr(state, "key", None)
         if key is None:
             return
+        conn = self.connections.get(mac)
+        if conn is not None:
+            conn.setdefault("states", {})[key] = state
         dev = self._find_node_device(mac)
         if dev is None:
             return
@@ -1984,13 +2090,11 @@ class Plugin(indigo.PluginBase):
             LightInfo, FanInfo, CoverInfo, ClimateInfo, LockInfo,
         )
         if isinstance(primary_entity, LightInfo) and type_id == "esphomeLight":
-            modes = set(getattr(primary_entity, "supported_color_modes", []) or [])
-            return {
-                "SupportsColor":            any(m >= 19 for m in modes),
-                "SupportsRGB":              any(m >= 19 for m in modes),
-                "SupportsWhite":            11 in modes or 27 in modes,
-                "SupportsWhiteTemperature": 11 in modes or 27 in modes,
-            }
+            return light_capability_props(
+                getattr(primary_entity, "supported_color_modes", []) or [],
+                getattr(primary_entity, "min_mireds", 0),
+                getattr(primary_entity, "max_mireds", 0),
+            )
         if isinstance(primary_entity, FanInfo) and type_id == "esphomeFan":
             return {
                 "speedLevels":         str(getattr(primary_entity, "supported_speed_count", 0) or 0),
@@ -2078,6 +2182,11 @@ class Plugin(indigo.PluginBase):
         under state_id "primary". Look it up there.
         """
         mac = dev.address                 # node device's address IS the MAC
+        # Indigo's own examples name Status Request both ways; accept either.
+        if action.deviceAction in (indigo.kDeviceAction.RequestStatus,
+                                   indigo.kUniversalAction.RequestStatus):
+            self._request_status(dev)
+            return
         try:
             em = json.loads(dev.pluginProps.get("entityKeyMap", "") or "{}")
             key = int(em.get("primary", {}).get("key", 0))
@@ -2151,16 +2260,14 @@ class Plugin(indigo.PluginBase):
                 kwargs["state"] = new_level > 0
                 kwargs["brightness"] = new_level / 100.0
             elif da == indigo.kDeviceAction.SetColorLevels:
-                # Indigo passes action.actionValue as a dict-like ColorValues
-                # object with redLevel/greenLevel/blueLevel/whiteLevel/whiteLevel2
-                # all in 0.0-100.0 range. Map to ESPHome's 0.0-1.0 rgb tuple
-                # plus optional brightness preservation.
-                colors = action.actionValue
-                r = float(colors.get("redLevel",   0)) / 100.0
-                g = float(colors.get("greenLevel", 0)) / 100.0
-                b = float(colors.get("blueLevel",  0)) / 100.0
+                colour = light_colour_kwargs(action.actionValue, dev.states)
+                if not colour:
+                    self.logger.warning(
+                        f"{dev.name}: set colour carried no level this light can use"
+                    )
+                    return
+                kwargs.update(colour)
                 kwargs["state"] = True
-                kwargs["rgb"]   = (r, g, b)
                 # Preserve current brightness
                 cur_b = dev.brightness or 100
                 kwargs["brightness"] = max(cur_b, 1) / 100.0
@@ -2252,6 +2359,9 @@ class Plugin(indigo.PluginBase):
                 cover_kwargs["position"] = 1.0   # fully open
             elif da == indigo.kDeviceAction.TurnOff:
                 cover_kwargs["position"] = 0.0   # fully closed
+            elif da == indigo.kDeviceAction.Toggle:
+                # Any open position counts as on, so Toggle closes it
+                cover_kwargs["position"] = 0.0 if bool(dev.onState) else 1.0
             elif da == indigo.kDeviceAction.SetBrightness:
                 pct = int(action.actionValue)
                 cover_kwargs["position"] = max(0.0, min(1.0, pct / 100.0))
@@ -2276,6 +2386,35 @@ class Plugin(indigo.PluginBase):
             return
 
         self.logger.debug(f"actionControlDevice: no handler for type {dev.deviceTypeId} on {dev.name}")
+
+    def _request_status(self, dev):
+        """Status Request for a node device.
+
+        ESPHome has no "send me one entity's state" message: a node pushes
+        every change while connected, and the plugin keeps the last one per
+        entity. So a status request re-writes those, on the asyncio thread
+        where every other state write for this node happens.
+        """
+        mac = dev.address
+        if not self._node_is_live(mac):
+            self.logger.warning(f"{dev.name}: not connected to {mac}")
+            self._sync_connection_states(dev)
+            return
+        loop = self.async_loop
+        if loop is None or not loop.is_running():
+            self.logger.warning(f"{dev.name}: the plugin's connection thread is not running")
+            return
+        loop.call_soon_threadsafe(self._replay_cached_states, mac, dev.name)
+
+    def _replay_cached_states(self, mac, name):
+        """Re-apply the last state each entity sent. Runs on the asyncio thread."""
+        cached = list(((self.connections.get(mac) or {}).get("states") or {}).values())
+        if not cached:
+            self.logger.info(f"{name}: connected, but the device has sent no readings yet")
+            return
+        for state in cached:
+            self._on_entity_state(mac, state)
+        self.logger.info(f"{name}: status refreshed from the latest readings the device sent")
 
     def actionControlSensor(self, action, dev):
         """Sensor-class devices (esphomeSensor) get their own action callback.
@@ -2825,6 +2964,9 @@ class Plugin(indigo.PluginBase):
         if dev.deviceTypeId in self._OUR_DEVICE_TYPES:
             self.nodes_by_mac[dev.address] = dev
             self._keep_churn_out_of_sql_logger(dev)
+            # Connected/Status are left over from the last run until something
+            # rewrites them — say what is true now.
+            self._sync_connection_states(dev)
             # Adding (or re-enabling) a device for a parked node is the clearest
             # possible signal that the user wants it connected — try again now
             # rather than making them restart the plugin.
@@ -2845,6 +2987,40 @@ class Plugin(indigo.PluginBase):
         except Exception as exc:
             self.logger.warning(f"{dev.name}: could not set the SQL Logger ignore "
                                 f"list ({exc}); history keeps logging every packet")
+
+    def _node_is_live(self, mac):
+        """Is there a working connection to this node right now?"""
+        conn = self.connections.get(mac) or {}
+        client = conn.get("client")
+        if client is None or conn.get("info") is None:
+            return False
+        return self._client_is_connected(client)
+
+    def _sync_connection_states(self, dev):
+        """Make Connected/Status match the connection as it is now.
+
+        A node waiting for a usable encryption key keeps its "Bad key" /
+        "Needs encryption key" status, which says more than "Disconnected".
+        Writes only when something differs.
+        """
+        mac = dev.address
+        if self._node_is_live(mac):
+            connected, status = True, "Online"
+        else:
+            connected = False
+            status = dev.states.get("status", "")
+            awaiting_key = self.parked.get(mac, {}).get("reason") == PARK_NEEDS_KEY
+            if not (awaiting_key and status in ("Bad key", "Needs encryption key")):
+                status = "Disconnected"
+        if dev.states.get("connected") == connected and dev.states.get("status") == status:
+            return
+        try:
+            dev.updateStatesOnServer([
+                {"key": "connected", "value": connected},
+                {"key": "status",    "value": status},
+            ])
+        except Exception as exc:
+            self.logger.debug(f"{dev.name}: connection state update failed: {exc}")
 
     def deviceStopComm(self, dev):
         if dev.deviceTypeId in self._OUR_DEVICE_TYPES:

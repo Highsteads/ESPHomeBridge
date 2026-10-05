@@ -7,6 +7,18 @@ nav_order: 9
 
 The newest version is at the top.
 
+## 0.10.1 — 5 October 2026
+
+**A device that moves to a new network address is found there.** When your router gave an ESPHome device a new address, the plugin kept trying the old one until it was restarted. It now hears the device announce its new address, says so once in the Event Log, and connects there, straight away even if it had given up on it.
+
+**A device that does not use encryption no longer sends the plugin round in circles.** With a **Default API Encryption Key** set, the plugin offered that key to a device that does not use one, cleared it, then offered it again, over and over with no pause. Once a device has said it does not use encryption, the plugin offers it no key at all. If the device later asks for one, or you type a key into its settings, the plugin uses keys for it again.
+
+**Thermostats show their action and preset as words.** The HVAC Action showed a number, such as 3, rather than heating, and the preset was never shown at all. A thermostat also gets its heat and cool setpoints in Indigo, and its list of modes in the device's settings reads Off, Heat, Cool and so on rather than numbers. That part reaches each thermostat the next time the plugin connects to it.
+
+**Disabling a device in Indigo leaves it alone.** The plugin went on writing readings to a disabled device. It now closes the connection to it, and enabling the device again reconnects it.
+
+**A device that is switched off no longer fills the log once an hour.** The plugin warned twice each time it gave up, and once it had given up on a device you have in Indigo it started again a minute later, every minute. It now tries an hour later, says nothing more unless it gets through, and only starts again early for a device that is new in Indigo or has moved address. The line saying it is connecting is written once, not on every try.
+
 ## 0.10.0 — 27 September 2026
 
 **Connected and Status now tell the truth whichever way auto-create is set.** With **Auto-create Indigo devices on discovery** unticked, a device you had made yourself never showed **Online**, even while it was working perfectly. It does now, and every device's **Connected** and **Status** are put right when the plugin starts, rather than carrying on from before.

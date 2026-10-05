@@ -51,6 +51,7 @@ class FakeDevice:
         self.onState       = False
         self.brightness    = 0
         self.refresh_calls = 0
+        self.enabled       = True     # real Indigo devices always carry this
 
     def updateStateOnServer(self, key, value=None, uiValue=None):
         self.states[key] = value

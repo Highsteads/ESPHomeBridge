@@ -29,7 +29,7 @@ The device uses an encryption key, and the plugin has no key for it (**Needs enc
 The plugin has tried to connect ten times in a row, or three for a device that is not in Indigo, and has stopped trying for an hour.
 
 - If it is not really an ESPHome device — some makers' products, such as SMLIGHT's Zigbee coordinators, announce themselves as ESPHome devices without being one — add its MAC address, name or network address to **Ignore these devices** in the plugin's settings. It will never be tried or warned about again.
-- If it is an ESPHome device that was switched off or away, it is tried again after an hour, or straight away if you add it to Indigo or disable and enable its Indigo device.
+- If it is an ESPHome device that was switched off or away, it is tried again each hour without another line in the log, or straight away if you add it to Indigo, disable and enable its Indigo device, or it comes back at a new network address.
 - **List Discovered Devices** shows every device given up on, and the error that caused it.
 
 ## Status shows "Disconnected"

@@ -2,7 +2,7 @@
 
 **Bring your ESPHome plugs, lights and sensors into Indigo, found by themselves and talked to directly over your home network.**
 
-**Version:** 0.10.0 | **Author:** CliveS & Claude | **Needs:** Indigo 2025.2 or later
+**Version:** 0.10.1 | **Author:** CliveS & Claude | **Needs:** Indigo 2025.2 or later
 
 **[Read the full guide](https://highsteads.github.io/ESPHomeBridge/)** — setting up, what everything means, and what to do when something goes wrong.
 
@@ -53,6 +53,8 @@ I have tested switches, lights, fans, blinds and sensors on Athom smart plugs an
 The [full guide](https://highsteads.github.io/ESPHomeBridge/) goes through each step, explains every setting, and covers what to do if something does not work.
 
 ## What's new
+
+**v0.10.1** — A device your router moves to a new address is found there straight away instead of being tried at the old one for ever. A device that does not use encryption no longer sends the plugin round in circles when a default key is set. Thermostats show their action and preset as words, and get the right setpoints. Disabling a device's Indigo device now closes its connection, and enabling it reconnects. A device that is switched off is tried once an hour without filling the log.
 
 **v0.10.0** — **Connected** and **Status** now tell the truth when **Auto-create Indigo devices on discovery** is unticked, and are put right each time the plugin starts. **Toggle** works on a blind, **Send Status Request** works on switches, lights, fans, blinds and locks, changing a light's white temperature no longer turns it black, and each light now gets the colour and white-temperature controls it can really use.
 

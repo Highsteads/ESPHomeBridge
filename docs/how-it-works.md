@@ -33,14 +33,18 @@ If you delete an Indigo device while **Auto-create Indigo devices on discovery**
 
 A device that goes quiet, or a connection that fails, is tried again after five seconds, then ten, then twenty, doubling each time up to five minutes between tries. The Event Log gets one warning the first time, and the retries after that are quiet.
 
-After ten failures in a row for a device you have in Indigo, or three for one you do not, the plugin stops trying and says so once in the log — the line says it **gave up after** so many failed connections. That stops a device that is not really an ESPHome device from filling the log for ever. It tries once more an hour later, and straight away if you add the device to Indigo or enable its Indigo device. A device that worked and then drops starts the count again from nothing.
+After ten failures in a row for a device you have in Indigo, or three for one you do not, the plugin stops trying and says so once in the log — the line says it **gave up after** so many failed connections. That stops a device that is not really an ESPHome device from filling the log for ever. It tries again an hour later, without writing anything more to the log unless it gets through, and straight away if you add the device to Indigo, enable its Indigo device, or the device announces a new network address. A device that worked and then drops starts the count again from nothing.
+
+Each try uses the address the device last announced, so a device your router has moved is reached at its new address.
+
+If you disable a device's Indigo device, the plugin closes its connection and stops writing to it. Enable it again and the plugin reconnects.
 
 ## Encryption keys
 
 ESPHome can scramble everything sent between a device and whatever talks to it, using a key set in the device's configuration. Indigo needs the same key to talk to it. The plugin uses the key in the device's own settings if it has one, and the plugin's **Default API Encryption Key** if it does not.
 
 - **A wrong key, or no key for a device that needs one,** stops the plugin trying, because trying again with the same key only fills the log. It waits for you. As soon as you save a key in the device's settings, or a new default key in the plugin's settings, it tries again.
-- **A key for a device that does not use one** is cleared from the device's settings by the plugin, which then connects without it.
+- **A key for a device that does not use one** is cleared from the device's settings by the plugin, which then connects without it. From then on it offers that device no key at all, not even the default one, until the device asks for a key or you type one into its settings.
 
 ## Keeping SQL Logger's history small
 

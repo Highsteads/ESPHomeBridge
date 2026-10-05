@@ -4,9 +4,22 @@
 # Description: Indigo bridge for ESPHome devices via the Native API (port 6053).
 #              Auto-discovers via mDNS, connects per device via aioesphomeapi,
 #              maps each ESPHome entity to a native Indigo device.
-# Author:      CliveS & Claude Fable 5.1; Claude Opus 5.5 (0.8.5-0.10.0)
-# Date:        27-09-2026
-# Version:     0.10.0
+# Author:      CliveS & Claude Fable 5.1; Claude Opus 5.5 (0.8.5-0.10.1)
+# Date:        05-10-2026
+# Version:     0.10.1
+#
+# v0.10.1 (05-10-2026): AUDIT FIXES. A node that moves address (DHCP) is re-learnt:
+# mDNS Updated is handled as well as Added, and the connect loop reads the discovery
+# entry afresh on every attempt; a parked node that moves is retried at once, and the
+# connection slot is claimed at spawn so Added+Updated cannot start two connections.
+# A node found to speak plaintext is offered no key from ANY source again
+# (plaintext_nodes), so clearing the device key no longer hands it the migration or
+# default key in a tight loop; a repeat is counted and backed off. Climate modes,
+# HVAC action and preset are read by enum member name (enum_name): str() of the
+# IntEnum is the digit. A DISABLED device is no longer found or written to, its
+# connection is dropped, and enabling it reconnects; auto-create never duplicates it.
+# The parked sweep only wakes a node for a device NEW since it was parked, and the
+# hourly retry of a node already reported dead is quiet.
 #
 # v0.10.0 (27-09-2026): FAULTS FOUND WRITING THE GUIDE. Connected/Status now follow
 # the connection with auto-create off too (a hand-made device never went Online) and
@@ -140,7 +153,7 @@ except ImportError:
 # ============================================================
 
 PLUGIN_ID      = "com.clives.indigoplugin.esphomebridge"
-PLUGIN_VERSION = "0.10.0"
+PLUGIN_VERSION = "0.10.1"
 
 DEVICE_FOLDER_NAME = "ESPHome"
 
@@ -293,6 +306,27 @@ CAP_WHITE             = 4
 CAP_COLOR_TEMPERATURE = 8
 CAP_COLD_WARM_WHITE   = 16
 CAP_RGB               = 32
+
+
+def enum_name(value, enum_cls=None):
+    """The member name of an aioesphomeapi enum value, e.g. "HEAT".
+
+    Their enums are IntEnums, and str() of an IntEnum is the DIGIT ("3"), so
+    anything that reads a name out of str() sees numbers. A bare int (an older
+    library, or a raw protobuf value) is looked up in enum_cls when given.
+    Returns "" for None.
+    """
+    if value is None:
+        return ""
+    name = getattr(value, "name", None)
+    if isinstance(name, str) and name:
+        return name
+    if enum_cls is not None:
+        try:
+            return enum_cls(int(value)).name
+        except (TypeError, ValueError):
+            pass
+    return str(value).split(".")[-1]
 
 
 def light_capability_props(modes, min_mireds=0, max_mireds=0):
@@ -541,8 +575,18 @@ class Plugin(indigo.PluginBase):
         # mid-flight and the connection silently disappears.
         self._connect_tasks = set()
 
-        # Nodes we've stopped retrying: mac -> {"reason", "since", "failures"}
+        # Nodes we've stopped retrying:
+        # mac -> {"reason", "since", "failures", "device_id"}
+        # device_id is the Indigo device that existed when it was parked, so the
+        # sweep can tell a NEW device (worth an immediate retry) from the one
+        # that was there all along.
         self.parked = {}
+
+        # Nodes found to speak plaintext. Once a node has said so, NO key source
+        # (device, migration snapshot or plugin default) is offered to it again,
+        # or clearing one key just hands it the next and the retry never ends.
+        # Lifted when the node asks for encryption, or a key is typed on its device.
+        self.plaintext_nodes = set()
 
         # Config
         self.auto_create_nodes = as_bool(pluginPrefs.get("autoCreateDevices", True), True)
@@ -1087,7 +1131,9 @@ class Plugin(indigo.PluginBase):
         """zeroconf callback. Called from zeroconf's own thread.
         Schedule the actual handler on the asyncio loop."""
         from zeroconf import ServiceStateChange
-        if state_change != ServiceStateChange.Added:
+        # Updated matters as much as Added: it is how a node that has moved to
+        # a new address (DHCP) is re-learnt without waiting for Removed/Added.
+        if state_change not in (ServiceStateChange.Added, ServiceStateChange.Updated):
             return
         asyncio.run_coroutine_threadsafe(
             self._handle_mdns_added(zeroconf, service_type, name),
@@ -1128,7 +1174,11 @@ class Plugin(indigo.PluginBase):
             self.logger.debug(f"mDNS service {name} has no mac TXT; skipping")
             return
 
-        is_new = mac not in self.discovered
+        prev   = self.discovered.get(mac)
+        is_new = prev is None
+        moved  = (not is_new
+                  and (prev.get("ip"), prev.get("port")) != (ip, port)
+                  and ip != "")
         self.discovered[mac] = {
             "hostname":  hostname,
             "ip":        ip,
@@ -1136,7 +1186,7 @@ class Plugin(indigo.PluginBase):
             "version":   props.get("version", ""),
             "platform":  props.get("platform", ""),
             "board":     props.get("board", ""),
-            "first_seen": time.time(),
+            "first_seen": prev.get("first_seen", time.time()) if prev else time.time(),
         }
 
         if self._is_ignored(mac, hostname=hostname, ip=ip):
@@ -1163,10 +1213,21 @@ class Plugin(indigo.PluginBase):
                 f"(esphome {props.get('version','?')}, board {props.get('board','?')})"
             )
             self._fire_event("newDeviceDiscovered", mac)
+        elif moved:
+            # The connect loop reads the discovery entry afresh on every attempt,
+            # so a running connection picks the new address up on its next try.
+            self.logger.info(
+                f"{mac} ({hostname}) has moved to {ip}:{port} "
+                f"(was {prev.get('ip', '?')}:{prev.get('port', '?')})"
+            )
+            entry = self.parked.get(mac)
+            if entry is not None and entry.get("reason") != PARK_NEEDS_KEY:
+                # It may have been parked BECAUSE the old address was dead.
+                self._unpark(mac, "it has moved address")
 
         # Auto-connect (creates the Indigo node device too if auto-create is on)
         if self._should_connect(mac):
-            self._spawn_task(self._connect_to_device(mac), f"connect {mac}")
+            self._start_connection(mac)
 
     def _is_ignored(self, mac, hostname="", ip=""):
         """Is this node on the Configure dialog's ignore list?
@@ -1197,6 +1258,9 @@ class Plugin(indigo.PluginBase):
             return False
         if mac in self.connections:
             return False
+        if self._node_is_disabled(mac):
+            self.logger.debug(f"{mac}: its Indigo device is disabled; not connecting")
+            return False
         if mac in self.parked:
             self.logger.debug(f"{mac}: re-advertised but parked; leaving it alone")
             return False
@@ -1220,14 +1284,31 @@ class Plugin(indigo.PluginBase):
         """Stop retrying a node, and record why so it can be picked up later."""
         self._release_connection(mac)
         self.connections.pop(mac, None)
+        dev = self._find_node_device(mac)
         self.parked[mac] = {
-            "reason":   reason,
-            "since":    time.time(),
-            "failures": failures,
+            "reason":    reason,
+            "since":     time.time(),
+            "failures":  failures,
+            "device_id": dev.id if dev is not None else None,
         }
 
-    def _unpark(self, mac, why):
-        """Retry a parked node now. Safe to call from the asyncio thread only."""
+    def _start_connection(self, mac, quiet=False):
+        """Claim the node's connection slot NOW, then start its connect task.
+
+        The task only fills self.connections once it first runs, which is too
+        late: an mDNS Added and Updated arriving together could both pass
+        _should_connect in the same tick and start two connections to one node.
+        Asyncio thread only.
+        """
+        self.connections[mac] = {"client": None, "info": None, "entities": {}, "states": {}}
+        self._spawn_task(self._connect_to_device(mac, quiet=quiet), f"connect {mac}")
+
+    def _unpark(self, mac, why, quiet=False):
+        """Retry a parked node now. Safe to call from the asyncio thread only.
+
+        quiet: the node has already been reported dead once, so a retry that
+        fails the same way is logged at DEBUG rather than warned about again.
+        """
         if mac not in self.parked:
             return False
         if mac in self.connections:
@@ -1235,9 +1316,50 @@ class Plugin(indigo.PluginBase):
         if mac not in self.discovered:
             return False
         self.parked.pop(mac, None)
-        self.logger.info(f"{mac}: retrying connection ({why})")
-        self._spawn_task(self._connect_to_device(mac), f"connect {mac}")
+        if quiet:
+            self.logger.debug(f"{mac}: retrying connection ({why})")
+        else:
+            self.logger.info(f"{mac}: retrying connection ({why})")
+        self._start_connection(mac, quiet=quiet)
         return True
+
+    def _connect_if_idle(self, mac, why):
+        """Connect a discovered node that has nothing running. Asyncio thread only."""
+        if mac not in self.discovered or not self._should_connect(mac):
+            return False
+        self.logger.debug(f"{mac}: connecting ({why})")
+        self._start_connection(mac)
+        return True
+
+    def request_connect(self, mac, why):
+        """Ask the asyncio thread to connect an idle node. Callable from any thread."""
+        loop = self.async_loop
+        if loop is None or not loop.is_running():
+            return
+        loop.call_soon_threadsafe(self._connect_if_idle, mac, why)
+
+    def _node_is_disabled(self, mac):
+        """Does this node have an Indigo device, all of them disabled?"""
+        if self._find_node_device(mac) is not None:
+            return False
+        return self._find_node_device(mac, include_disabled=True) is not None
+
+    def _stop_if_disabled(self, mac):
+        """After deviceStopComm: if the node's device was DISABLED (not merely
+        restarted, deleted, or the plugin stopping), drop its connection so
+        nothing more is written to it. Re-enabling reconnects via deviceStartComm.
+        Asyncio thread only."""
+        if not self._node_is_disabled(mac):
+            return
+        self.parked.pop(mac, None)
+        conn = self.connections.get(mac)
+        if conn is None:
+            return
+        self.logger.info(f"{mac}: its Indigo device is disabled; disconnecting")
+        client = conn.get("client")
+        if client is not None:
+            # The connect task sees the drop, finds the device disabled and ends.
+            self._spawn_task(client.disconnect(), f"disconnect {mac}")
 
     def request_retry(self, mac, why):
         """Ask the asyncio thread to retry a parked node. Callable from any thread."""
@@ -1262,10 +1384,16 @@ class Plugin(indigo.PluginBase):
                 # device-exists branch below fires on EVERY sweep — would turn a
                 # single bad key into a reconnect/fail/park storm once a minute.
                 continue
-            if self._find_node_device(mac) is not None:
+            if self._node_is_disabled(mac):
+                continue
+            dev = self._find_node_device(mac)
+            if dev is not None and dev.id != entry.get("device_id"):
+                # Only a device that is NEW since the park. The one that existed
+                # all along is no reason to retry, and treating it as one woke a
+                # dead adopted node on every 60 s sweep, two warnings each time.
                 self._unpark(mac, "an Indigo device now exists for it")
             elif now - entry.get("since", 0) >= PARKED_RETRY_AFTER:
-                self._unpark(mac, "back-off elapsed")
+                self._unpark(mac, "back-off elapsed", quiet=True)
 
     def retry_nodes_awaiting_key(self, why):
         """Wake every node parked for want of a usable encryption key.
@@ -1295,18 +1423,41 @@ class Plugin(indigo.PluginBase):
             return False
         return bool(getattr(conn, "is_connected", True))
 
-    async def _connect_to_device(self, mac):
+    def _resolve_key(self, mac, node_dev):
+        """(key, source) for a node, ignoring any plaintext decision.
+
+        source is "device", "migration" or "default", or "" with key None.
+        The migration snapshot matters because the node device may not exist
+        yet at first connect, but a key preserved across the v0.4.0 migration
+        must still apply.
+        """
+        key = node_dev.pluginProps.get("encryptionKey", "") if node_dev else ""
+        if key:
+            return key, "device"
+        key = self._migration_saved_keys().get(mac, "")
+        if key:
+            return key, "migration"
+        if self.default_encryption_key:
+            return self.default_encryption_key, "default"
+        return None, ""
+
+    async def _connect_to_device(self, mac, quiet=False):
         """Open a persistent aioesphomeapi connection to one ESPHome device.
         Auto-reconnects with backoff on disconnect. A fresh APIClient is
         created on each reconnect attempt to avoid 'Already connected' errors
         from a stale client whose internal state survived the previous failure.
+
+        quiet: a retry of a node already reported dead — failures go to DEBUG
+        until it connects again.
         """
+        import aioesphomeapi as _api
         from aioesphomeapi import APIClient, APIConnectionError, InvalidAuthAPIError
+        plaintext_error = getattr(_api, "EncryptionPlaintextAPIError", ())
 
         d = self.discovered.get(mac)
-        if not d:
-            return
-        if self._is_ignored(mac):
+        if not d or self._is_ignored(mac):
+            # Give back the slot _start_connection claimed for us.
+            self.connections.pop(mac, None)
             return
 
         # "states" holds the last state object each entity sent (entity key ->
@@ -1319,16 +1470,33 @@ class Plugin(indigo.PluginBase):
         last_error = ""
 
         while True:
-            # Resolve encryption key fresh on each iteration so a key clear
-            # (e.g. after a "device is plaintext" error) takes effect on retry.
-            # v0.4.0: also consult the migration-saved keys snapshot — the
-            # node device may not exist yet at first-connect, but a key
-            # preserved across the v0.4.0 migration must still apply.
+            if self._node_is_disabled(mac):
+                # Disabled in Indigo while we were waiting to retry.
+                self.logger.debug(f"{mac}: Indigo device disabled; stopping connection attempts")
+                self._release_connection(mac)
+                self.connections.pop(mac, None)
+                return
+
+            # Read the discovery entry afresh on every attempt: a node that has
+            # moved (DHCP) is re-learnt by mDNS, and dialling the address we
+            # started with would fail for ever.
+            current = self.discovered.get(mac)
+            if current is not None and current is not d:
+                if (current.get("ip"), current.get("port")) != (d.get("ip"), d.get("port")):
+                    self.logger.debug(
+                        f"{mac}: dialling its new address {current.get('ip')}:"
+                        f"{current.get('port')} (was {d.get('ip')}:{d.get('port')})"
+                    )
+                d = current
+
+            # Resolve the encryption key fresh on each iteration, so a key
+            # cleared or typed in takes effect on the next try. A node known to
+            # speak plaintext is offered no key from any source.
             node_dev = self._find_node_device(mac)
-            per_device_key = node_dev.pluginProps.get("encryptionKey", "") if node_dev else ""
-            if not per_device_key:
-                per_device_key = self._migration_saved_keys().get(mac, "")
-            encryption_key = per_device_key or self.default_encryption_key or None
+            if mac in self.plaintext_nodes:
+                encryption_key, key_source = None, ""
+            else:
+                encryption_key, key_source = self._resolve_key(mac, node_dev)
             client = APIClient(
                 d["ip"], d["port"], password=None,
                 noise_psk=encryption_key,
@@ -1338,7 +1506,12 @@ class Plugin(indigo.PluginBase):
 
             unsubscribe = None
             try:
-                self.logger.info(f"Connecting to {mac} at {d['ip']}:{d['port']}...")
+                # Say it once per run; every back-off retry repeating it at INFO
+                # was ten lines an hour for a node that is simply switched off.
+                if failures == 0 and not quiet:
+                    self.logger.info(f"Connecting to {mac} at {d['ip']}:{d['port']}...")
+                else:
+                    self.logger.debug(f"Connecting to {mac} at {d['ip']}:{d['port']}...")
                 await client.connect(login=True)
                 self.logger.info(f"Connected to {mac}")
 
@@ -1375,15 +1548,17 @@ class Plugin(indigo.PluginBase):
                 backoff    = RECONNECT_BACKOFF_INITIAL
                 failures   = 0
                 was_online = True
+                quiet      = False     # it works again: the next drop is news
 
                 # Hold the connection open. We use a long sleep rather than
                 # an event-driven wait because aioesphomeapi doesn't expose a
                 # disconnect-waiter; reconnect happens via the exception path
                 # when the TCP connection drops and the next state callback
                 # raises, or when our outer code disconnects on shutdown.
-                while self._client_is_connected(client):
+                while self._client_is_connected(client) and not self._node_is_disabled(mac):
                     await asyncio.sleep(10)
-                self.logger.warning(f"{mac}: connection dropped")
+                if not self._node_is_disabled(mac):
+                    self.logger.warning(f"{mac}: connection dropped")
 
             except InvalidAuthAPIError:
                 self.logger.error(
@@ -1402,29 +1577,53 @@ class Plugin(indigo.PluginBase):
                 return  # don't keep retrying with a known-bad key
             except (APIConnectionError, OSError, ConnectionError) as exc:
                 msg = str(exc).lower()
-                # Device is plaintext but we sent encryption handshake.
-                # Means a stale / wrong key is on this device's pluginProps.
-                # Auto-clear it and retry — this self-heals freezer-plug-style
-                # regressions where a key was accidentally written to a
-                # plaintext device.
-                if "using plaintext" in msg or "plaintext protocol" in msg:
-                    self.logger.warning(
-                        f"{mac}: device is plaintext but had an encryption key set. "
-                        "Auto-clearing the key and retrying without encryption."
-                    )
-                    if node_dev:
-                        try:
-                            props = dict(node_dev.pluginProps)
-                            props["encryptionKey"] = ""
-                            node_dev.replacePluginPropsOnServer(props)
-                        except Exception as clear_exc:
-                            self.logger.debug(f"failed to clear key: {clear_exc}")
+                is_plaintext = ((plaintext_error and isinstance(exc, plaintext_error))
+                                or "using plaintext" in msg or "plaintext protocol" in msg)
+                # Device is plaintext but we sent an encryption handshake.
+                # Record that, so NO key source is offered to it again, and
+                # retry once straight away. Clearing only the device key used to
+                # hand the next attempt the migration or default key, which
+                # failed the same way, round and round with no back-off.
+                if is_plaintext and encryption_key is not None:
+                    self.plaintext_nodes.add(mac)
+                    if key_source == "device":
+                        # A key typed on a plaintext node is a real mistake —
+                        # this self-heals the freezer-plug case.
+                        self.logger.warning(
+                            f"{mac}: device is plaintext but had an encryption key set. "
+                            "Clearing the key and connecting without encryption."
+                        )
+                        if node_dev:
+                            try:
+                                props = dict(node_dev.pluginProps)
+                                props["encryptionKey"] = ""
+                                node_dev.replacePluginPropsOnServer(props)
+                            except Exception as clear_exc:
+                                self.logger.debug(f"failed to clear key: {clear_exc}")
+                    else:
+                        # A plugin-wide or migrated key simply does not apply to
+                        # this node. Expected, so not a warning.
+                        self.logger.info(
+                            f"{mac}: device does not use encryption; connecting "
+                            f"without the {key_source} key."
+                        )
                     backoff = RECONNECT_BACKOFF_INITIAL
-                    continue   # immediate retry — next loop reads fresh key (empty now)
+                    continue   # one immediate retry; from now on no key is offered
+                # Told "plaintext" when no key was sent: falls through and is
+                # counted below like any other failure, never retried at once.
 
                 # 'Connection requires encryption' = device has API encryption
                 # set but we have no key for it. Give up rather than spam logs.
-                if "requires encryption" in msg or ("encryption" in msg and "wrong" in msg):
+                needs_key = "requires encryption" in msg or ("encryption" in msg and "wrong" in msg)
+                if needs_key and mac in self.plaintext_nodes:
+                    # Re-flashed with encryption since we decided it was
+                    # plaintext. Lift that, and if any key is on hand let the
+                    # next attempt use it — counted and backed off like any
+                    # other failure, so this can never spin.
+                    self.plaintext_nodes.discard(mac)
+                    if self._resolve_key(mac, node_dev)[0] is not None:
+                        needs_key = False
+                if needs_key:
                     if node_dev:
                         # Configured Indigo device without a usable key — actionable.
                         self.logger.error(
@@ -1475,6 +1674,12 @@ class Plugin(indigo.PluginBase):
                 self._release_connection(mac)
                 self.connections.pop(mac, None)
                 return
+            if self._node_is_disabled(mac):
+                # Disabled in Indigo: _stop_if_disabled dropped us on purpose.
+                self.logger.debug(f"{mac}: Indigo device disabled; stopping connection attempts")
+                self._release_connection(mac)
+                self.connections.pop(mac, None)
+                return
             node = self._find_node_device(mac)
             if was_online:
                 # A drop after a good session isn't evidence the node is bogus,
@@ -1491,8 +1696,9 @@ class Plugin(indigo.PluginBase):
                 except Exception:
                     pass
 
-            # Adaptive logging: say it plainly once, then go quiet.
-            if failures == 1:
+            # Adaptive logging: say it plainly once, then go quiet. A quiet run
+            # is the hourly retry of a node already reported dead.
+            if failures == 1 and not quiet:
                 self.logger.warning(
                     f"{mac} at {d['ip']}: connection failed: {last_error}. "
                     f"Retrying quietly with back-off."
@@ -1505,14 +1711,27 @@ class Plugin(indigo.PluginBase):
 
             limit = MAX_CONNECT_FAILURES_ADOPTED if node else MAX_CONNECT_FAILURES_UNADOPTED
             if failures >= limit:
-                where = "this Indigo device" if node else \
-                        "no matching Indigo device — it may not be an ESPHome node at all"
-                self.logger.warning(
-                    f"{mac} at {d['ip']}: gave up after {failures} failed connections "
-                    f"({last_error}); {where}. No further attempts for "
-                    f"{PARKED_RETRY_AFTER // 60} minutes. Adding it as an Indigo device "
-                    "retries straight away."
-                )
+                if quiet:
+                    self.logger.debug(
+                        f"{mac} at {d['ip']}: still unreachable after {failures} "
+                        f"attempts ({last_error}); next try in "
+                        f"{PARKED_RETRY_AFTER // 60} minutes"
+                    )
+                elif node:
+                    self.logger.warning(
+                        f"{mac} at {d['ip']}: gave up after {failures} failed connections "
+                        f"({last_error}); this Indigo device stays disconnected. "
+                        f"Trying again in {PARKED_RETRY_AFTER // 60} minutes, or "
+                        "straight away if it re-appears at a new address."
+                    )
+                else:
+                    self.logger.warning(
+                        f"{mac} at {d['ip']}: gave up after {failures} failed connections "
+                        f"({last_error}); no matching Indigo device — it may not be an "
+                        f"ESPHome node at all. No further attempts for "
+                        f"{PARKED_RETRY_AFTER // 60} minutes. Adding it as an Indigo device "
+                        "retries straight away."
+                    )
                 self._park_connection(mac, last_error, failures)
                 return
 
@@ -1875,19 +2094,24 @@ class Plugin(indigo.PluginBase):
                         updates.append({"key": "setpointHeat", "value": float(tgt)})
                         updates.append({"key": "setpointCool", "value": float(tgt)})
 
-            # Current HVAC action (heating / cooling / idle)
+            # Current HVAC action (heating / cooling / idle). By member name:
+            # str() of the IntEnum is the digit, which is what used to be written.
+            from aioesphomeapi import ClimateAction, ClimatePreset
             action_raw = getattr(state, "action", None)
             if action_raw is not None:
-                action_name = str(action_raw).split(".")[-1].lower()
-                updates.append({"key": "action", "value": action_name})
+                updates.append({"key": "action",
+                                "value": enum_name(action_raw, ClimateAction).lower()})
 
-            # Preset
+            # Preset. A custom preset, when the node uses one, says more than the
+            # NONE the standard field then carries. The old isinstance(int) test
+            # skipped every standard preset, because an IntEnum IS an int.
+            custom = getattr(state, "custom_preset", "") or ""
             preset_raw = getattr(state, "preset", None)
-            if preset_raw is not None and not isinstance(preset_raw, int):
-                preset_name = str(preset_raw).split(".")[-1].lower()
-                updates.append({"key": "preset", "value": preset_name})
-            elif hasattr(state, "custom_preset") and state.custom_preset:
-                updates.append({"key": "preset", "value": str(state.custom_preset)})
+            if custom:
+                updates.append({"key": "preset", "value": str(custom)})
+            elif preset_raw is not None:
+                updates.append({"key": "preset",
+                                "value": enum_name(preset_raw, ClimatePreset).lower()})
 
             try:
                 dev.updateStatesOnServer(updates)
@@ -1934,10 +2158,16 @@ class Plugin(indigo.PluginBase):
         except Exception as exc:
             self.logger.debug(f"node status update failed for {mac}: {exc}")
 
-    def _find_node_device(self, mac):
+    def _find_node_device(self, mac, include_disabled=False):
         """v0.4.0: there is now exactly one Indigo device per MAC, of one
         of several types (esphomeNode/Switch/Light/Fan/Cover/Climate/Lock)
-        depending on the node's primary entity. Address is always the MAC."""
+        depending on the node's primary entity. Address is always the MAC.
+
+        A DISABLED device is not returned unless include_disabled: disabling a
+        device is the user saying "leave it alone", so its states must stop
+        being written. Only the creator asks for disabled ones too, so it never
+        makes a second device beside one the user has switched off.
+        """
         cached = self.nodes_by_mac.get(mac)
         if cached is not None:
             # Re-fetch: an Indigo device object is a snapshot, and the cached
@@ -1946,15 +2176,20 @@ class Plugin(indigo.PluginBase):
             try:
                 fresh = indigo.devices[cached.id]
             except Exception:
-                self.nodes_by_mac.pop(mac, None)
-                return None
-            self.nodes_by_mac[mac] = fresh
-            return fresh
+                fresh = None
+            if fresh is not None and fresh.enabled:
+                self.nodes_by_mac[mac] = fresh
+                return fresh
+            self.nodes_by_mac.pop(mac, None)
+        disabled = None
         for d in indigo.devices.iter("self"):
             if d.address == mac and d.deviceTypeId in self._OUR_DEVICE_TYPES:
-                self.nodes_by_mac[mac] = d
-                return d
-        return None
+                if d.enabled:
+                    self.nodes_by_mac[mac] = d
+                    return d
+                if disabled is None:
+                    disabled = d
+        return disabled if include_disabled else None
 
     def _ensure_node_device(self, mac, device_info, entities):
         """v0.4.0 one-device-per-node creator.
@@ -1980,7 +2215,12 @@ class Plugin(indigo.PluginBase):
         # Per-type extra pluginProps (capabilities derived from primary entity)
         extra_props = self._props_for_primary(type_id, primary_entity)
 
-        existing = self._find_node_device(mac)
+        existing = self._find_node_device(mac, include_disabled=True)
+        if existing and not existing.enabled:
+            # The user has switched it off. Neither update it nor create a
+            # second device beside it.
+            self.logger.debug(f"{mac}: Indigo device '{existing.name}' is disabled; leaving it alone")
+            return None
         if existing:
             # In-place update — but if Indigo's existing deviceTypeId doesn't
             # match the type we'd pick now, we can't just rename it in place
@@ -2113,15 +2353,17 @@ class Plugin(indigo.PluginBase):
                 "requiresCode": bool(getattr(primary_entity, "requires_code", False)),
             }
         if isinstance(primary_entity, ClimateInfo) and type_id == "esphomeClimate":
+            from aioesphomeapi import ClimateMode
             modes      = list(getattr(primary_entity, "supported_modes", []) or [])
-            mode_names = [str(m).upper() for m in modes]
-            has_heat   = any("HEAT" in n for n in mode_names)
-            has_cool   = any("COOL" in n for n in mode_names)
+            # By member name, never str(): str() of the IntEnum is the digit.
+            mode_names = [enum_name(m, ClimateMode).upper() for m in modes]
+            has_heat   = any("HEAT" in n for n in mode_names)   # HEAT, HEAT_COOL
+            has_cool   = any("COOL" in n for n in mode_names)   # COOL, HEAT_COOL
             two_point  = bool(getattr(primary_entity, "supports_two_point_target_temperature", False))
             return {
                 "visualMin":               str(getattr(primary_entity, "visual_min_temperature", 0) or 0),
                 "visualMax":               str(getattr(primary_entity, "visual_max_temperature", 0) or 0),
-                "supportedModes":          ", ".join(str(m).split(".")[-1] for m in modes),
+                "supportedModes":          ", ".join(mode_names),
                 "twoPoint":                two_point,
                 "NumTemperatureInputs":    "1" if getattr(primary_entity, "supports_current_temperature", False) else "0",
                 "SupportsHeatSetpoint":    has_heat or two_point,
@@ -2732,6 +2974,7 @@ class Plugin(indigo.PluginBase):
         """List every node seen via mDNS, with what the plugin made of each.
 
         Tags: CONNECTED (talking to us), ADOPTED (has an Indigo device),
+        DISABLED (its Indigo device is disabled, so it is left alone),
         DISCOVERED (seen, no Indigo device), PARKED (stopped retrying — most
         often something that isn't an ESPHome node but shares the mDNS
         service type, such as a SMLIGHT Zigbee coordinator), IGNORED (on the
@@ -2747,6 +2990,8 @@ class Plugin(indigo.PluginBase):
                 tag = "[PARKED]"
             elif mac in self.connections and self.connections[mac].get("info"):
                 tag = "[CONNECTED]"
+            elif self._node_is_disabled(mac):
+                tag = "[DISABLED]"
             elif self._find_node_device(mac) is not None:
                 tag = "[ADOPTED]"
             else:
@@ -2967,11 +3212,19 @@ class Plugin(indigo.PluginBase):
             # Connected/Status are left over from the last run until something
             # rewrites them — say what is true now.
             self._sync_connection_states(dev)
+            # A key typed on the device overrides an earlier "this node is
+            # plaintext" decision — it may have been re-flashed with encryption.
+            if (dev.pluginProps.get("encryptionKey", "") or ""):
+                self.plaintext_nodes.discard(dev.address)
             # Adding (or re-enabling) a device for a parked node is the clearest
             # possible signal that the user wants it connected — try again now
             # rather than making them restart the plugin.
             if dev.address in self.parked:
                 self.request_retry(dev.address, "device added or re-enabled in Indigo")
+            else:
+                # Re-enabled: _stop_if_disabled dropped its connection. A no-op
+                # while one is running or before mDNS has found the node.
+                self.request_connect(dev.address, "device enabled in Indigo")
 
     def _keep_churn_out_of_sql_logger(self, dev):
         """v0.8.5: see SQL_LOGGER_CHURN_STATES. Writes only when something is
@@ -3025,6 +3278,12 @@ class Plugin(indigo.PluginBase):
     def deviceStopComm(self, dev):
         if dev.deviceTypeId in self._OUR_DEVICE_TYPES:
             self.nodes_by_mac.pop(dev.address, None)
+            # deviceStopComm also comes for a props change, a deletion and the
+            # plugin stopping. _stop_if_disabled re-reads the device on the
+            # asyncio thread and only acts if it really has been disabled.
+            loop = self.async_loop
+            if loop is not None and loop.is_running():
+                loop.call_soon_threadsafe(self._stop_if_disabled, dev.address)
 
     @staticmethod
     def didDeviceCommPropertyChange(oldDevice, newDevice):
